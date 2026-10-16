@@ -1,0 +1,22 @@
+---
+- name: Agentic-SONiC bench_net dataset item - VLAN-E-03
+  hosts: sonic_switches
+  gather_facts: false
+  become: true
+  become_method: sudo
+  tasks:
+  - name: Add Ethernet12 as untagged member of VLAN100 on SONiC-VS-1
+    raw: config vlan member add 100 Ethernet12
+    when: inventory_hostname == "SONiC-VS-1"
+    ignore_errors: true
+
+  - name: Verify Ethernet12 is an untagged member of VLAN100
+    raw: show vlan brief | grep -w 100
+    when: inventory_hostname == "SONiC-VS-1"
+    register: vlan_member_check
+    failed_when: vlan_member_check.rc != 0 or 'Ethernet12' not in vlan_member_check.stdout
+    changed_when: false
+
+  - name: Save config on SONiC-VS-1
+    raw: sudo config save -y
+    when: inventory_hostname == "SONiC-VS-1"

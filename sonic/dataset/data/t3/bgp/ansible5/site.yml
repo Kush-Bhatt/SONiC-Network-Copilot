@@ -1,0 +1,39 @@
+---
+########################################
+# Single Switch BGP Automation
+# VS-1 = ASN 65001
+########################################
+
+- name: Configure BGP on VS-1
+  hosts: vs-1
+  gather_facts: false
+  tasks:
+    - name: Configure BGP on VS-1
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp 65001" \
+              -c "bgp router-id 192.168.100.2" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor 10.0.0.1 remote-as 65002" \
+              -c "neighbor 10.0.0.1 description to-vs-3" \
+              -c "neighbor 10.0.0.1 timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "network 192.168.10.0/24" \
+              -c "neighbor 10.0.0.1 activate" \
+              -c "neighbor 10.0.0.1 soft-reconfiguration inbound" \
+              -c "end"
+
+    - name: Save FRR config on VS-1
+      shell: vtysh -c "write memory"
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout

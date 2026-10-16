@@ -1,0 +1,122 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 10.0.23.1
+        - 10.0.23.2
+      changed_when: false
+
+- name: Configure BGP on SONiC switches — register/when chaining style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 1. BGP ROUTER ───────────────────────────────────
+    - name: Check if BGP instance already exists
+      ansible.builtin.shell: |
+        sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_exists
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "no router bgp {{ bgp_asn }}" \
+                   -c "end" \
+                   -c "write memory"
+      when: bgp_exists.stdout != "0"
+      changed_when: true
+
+    - name: Check if router-id is already set correctly
+      ansible.builtin.shell: |
+        sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "bgp router-id {{ bgp_router_id }}" || true
+      register: router_id_check
+      changed_when: false
+
+    - name: Configure BGP router-id and policy
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "router bgp {{ bgp_asn }}" \
+                   -c "bgp router-id {{ bgp_router_id }}" \
+                   -c "no bgp ebgp-requires-policy" \
+                   -c "end" \
+                   -c "write memory"
+      when: router_id_check.stdout == "0"
+      changed_when: true
+
+    # ── 2. BGP NEIGHBORS ────────────────────────────────
+    - name: Check which BGP neighbors are missing
+      ansible.builtin.shell: |
+        sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "neighbor {{ item.peer_ip }} remote-as {{ item.remote_as }}" || true
+      loop: "{{ bgp_neighbors }}"
+      register: neighbor_check
+      changed_when: false
+
+    - name: Add missing BGP neighbors
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "router bgp {{ bgp_asn }}" \
+                   -c "neighbor {{ item.item.peer_ip }} remote-as {{ item.item.remote_as }}" \
+                   -c "end" \
+                   -c "write memory"
+      loop: "{{ neighbor_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 3. BGP NETWORKS ─────────────────────────────────
+    - name: Check which BGP networks are missing
+      ansible.builtin.shell: |
+        sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "network {{ item }}" || true
+      loop: "{{ bgp_networks }}"
+      register: network_check
+      changed_when: false
+      when: bgp_networks | length > 0
+
+    - name: Advertise missing BGP networks
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "router bgp {{ bgp_asn }}" \
+                   -c "address-family ipv4 unicast" \
+                   -c "network {{ item.item }}" \
+                   -c "exit" \
+                   -c "end" \
+                   -c "write memory"
+      loop: "{{ network_check.results }}"
+      when:
+        - bgp_networks | length > 0
+        - item.stdout == "0"
+      changed_when: true
+
+    # ── 4. WAIT FOR BGP TO ESTABLISH ────────────────────
+    - name: Wait 15 seconds for BGP to establish
+      ansible.builtin.pause:
+        seconds: 15
+
+    # ── 5. VERIFY ───────────────────────────────────────
+    - name: Collect verification output
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop:
+        - { cmd: "sudo vtysh -c 'show ip bgp summary'",   label: "BGP summary" }
+        - { cmd: "sudo vtysh -c 'show ip bgp neighbors'", label: "BGP neighbors" }
+        - { cmd: "ip route",                              label: "IP route" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print verification for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── {{ item.item.label }} ──"
+          - "{{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

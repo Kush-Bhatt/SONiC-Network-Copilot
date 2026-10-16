@@ -1,0 +1,69 @@
+---
+- name: Configure VLAN10 on SONiC-VS-4 (access switch for Alpine nodes) — block/rescue style
+  hosts: vs-4
+  gather_facts: no
+  become: yes
+  vars:
+    vlan_id: 10
+    vlan_name: "Vlan10"
+    vlan_ip: "10.0.2.1/24"
+    access_ports:
+      - Ethernet4
+      - Ethernet8
+
+  tasks:
+    - name: Configure VLAN, members, and SVI IP
+      block:
+        - name: Create VLAN10
+          ansible.builtin.shell: "config vlan add {{ vlan_id }}"
+          changed_when: true
+
+        - name: Add Ethernet4 as untagged member of VLAN10
+          ansible.builtin.shell: "config vlan member add {{ vlan_id }} {{ access_ports[0] }} -u"
+          changed_when: true
+
+        - name: Add Ethernet8 as untagged member of VLAN10
+          ansible.builtin.shell: "config vlan member add {{ vlan_id }} {{ access_ports[1] }} -u"
+          changed_when: true
+
+        - name: Assign IP to Vlan10 SVI
+          ansible.builtin.shell: "config interface ip add {{ vlan_name }} {{ vlan_ip }}"
+          changed_when: true
+      rescue:
+        - name: VLAN10 config failed — likely already exists, cleaning up and retrying
+          ansible.builtin.shell: |
+            config interface ip remove {{ vlan_name }} {{ vlan_ip }} 2>/dev/null || true
+            config vlan member del {{ vlan_id }} {{ access_ports[0] }} 2>/dev/null || true
+            config vlan member del {{ vlan_id }} {{ access_ports[1] }} 2>/dev/null || true
+            config vlan del {{ vlan_id }} 2>/dev/null || true
+          changed_when: true
+
+        - name: Retry full VLAN10 configuration
+          ansible.builtin.shell: |
+            config vlan add {{ vlan_id }}
+            config vlan member add {{ vlan_id }} {{ access_ports[0] }} -u
+            config vlan member add {{ vlan_id }} {{ access_ports[1] }} -u
+            config interface ip add {{ vlan_name }} {{ vlan_ip }}
+          changed_when: true
+
+    - name: Save running configuration
+      ansible.builtin.shell: "config save -y"
+      changed_when: true
+
+    - name: Verify VLAN10 brief
+      ansible.builtin.shell: "show vlan brief"
+      register: vlan_brief
+      changed_when: false
+
+    - name: Display VLAN10 brief output
+      debug:
+        msg: "{{ vlan_brief.stdout }}"
+
+    - name: Verify IP interfaces
+      ansible.builtin.shell: "show ip interfaces"
+      register: ip_intf
+      changed_when: false
+
+    - name: Display IP interfaces output
+      debug:
+        msg: "{{ ip_intf.stdout }}"

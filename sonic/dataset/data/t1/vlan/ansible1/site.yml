@@ -1,0 +1,194 @@
+---
+########################################
+# Leaf-Spine Topology Automation — block/rescue style
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Configure spine links
+      block:
+        - name: Remove existing IP on {{ item.iface }}
+          shell: |
+            existing=$(show ip interfaces | grep "{{ item.iface }}" | awk '{print $2}')
+            [ -n "$existing" ] && config interface ip remove {{ item.iface }} $existing || true
+          loop: "{{ my_config.links }}"
+          changed_when: true
+
+        - name: Assign IP {{ item.ip }} to {{ item.iface }}
+          shell: config interface ip add {{ item.iface }} {{ item.ip }}
+          loop: "{{ my_config.links }}"
+          changed_when: true
+      rescue:
+        - name: Spine link config failed — continuing
+          debug:
+            msg: "Spine link block failed on {{ inventory_hostname }}, continuing"
+
+    # Route cleanup stays unconditional (not gated by rescue) since
+    # vtysh/config route del often doesn't error loudly when nothing exists.
+    - name: Remove existing static routes on spine
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        fi
+      loop: "{{ my_config.routes }}"
+      changed_when: true
+      ignore_errors: true
+
+    - name: Add static routes on spine
+      block:
+        - name: Add route {{ item.prefix }} via {{ item.nexthop }}
+          shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+          loop: "{{ my_config.routes }}"
+          changed_when: true
+      rescue:
+        - name: Spine route add failed — continuing
+          debug:
+            msg: "Spine route block failed on {{ inventory_hostname }}, continuing"
+
+    - name: Save SONiC config on spine
+      shell: config save -y
+      changed_when: true
+
+
+- name: Configure Leaf Switches (VS-1, VS-2)
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    - name: Pre-clean access port and VLAN state
+      block:
+        - name: Remove access port from any VLAN it belongs to
+          shell: |
+            for vid in $(show vlan brief | grep "{{ my_config.access_port }}" | awk '{print $1}'); do
+              config vlan member del $vid {{ my_config.access_port }}
+            done
+          changed_when: true
+
+        - name: Remove any IP on access port
+          shell: |
+            existing=$(show ip interfaces | grep "^{{ my_config.access_port }}" | awk '{print $2}')
+            [ -n "$existing" ] && config interface ip remove {{ my_config.access_port }} $existing || true
+          changed_when: true
+
+        - name: Remove existing VLAN SVI IP if present
+          shell: |
+            existing=$(show ip interfaces | grep "^Vlan{{ my_config.vlan_id }}" | awk '{print $2}')
+            [ -n "$existing" ] && config interface ip remove Vlan{{ my_config.vlan_id }} $existing || true
+          changed_when: true
+
+        - name: Remove existing VLAN if present
+          shell: |
+            existing=$(show vlan brief | grep "^\s*{{ my_config.vlan_id }}")
+            [ -n "$existing" ] && config vlan del {{ my_config.vlan_id }} || true
+          changed_when: true
+      rescue:
+        - name: Pre-clean failed — continuing
+          debug:
+            msg: "Pre-clean block failed on {{ inventory_hostname }}, continuing"
+
+    - name: Configure VLAN, access port and links
+      block:
+        - name: Create VLAN
+          shell: config vlan add {{ my_config.vlan_id }}
+          changed_when: true
+
+        - name: Add access port to VLAN (untagged)
+          shell: config vlan member add -u {{ my_config.vlan_id }} {{ my_config.access_port }}
+          changed_when: true
+
+        - name: Assign SVI IP
+          shell: config interface ip add Vlan{{ my_config.vlan_id }} {{ my_config.vlan_ip }}
+          changed_when: true
+
+        - name: Assign IP on leaf inter-switch uplinks
+          shell: config interface ip add {{ item.iface }} {{ item.ip }}
+          loop: "{{ my_config.links }}"
+          changed_when: true
+      rescue:
+        - name: VLAN/uplink config failed — continuing
+          debug:
+            msg: "VLAN/uplink block failed on {{ inventory_hostname }}, continuing"
+
+    - name: Remove existing static routes on leaf
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        fi
+      loop: "{{ my_config.routes }}"
+      changed_when: true
+      ignore_errors: true
+
+    - name: Add static routes on leaf
+      block:
+        - name: Add route {{ item.prefix }} via {{ item.nexthop }}
+          shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+          loop: "{{ my_config.routes }}"
+          changed_when: true
+      rescue:
+        - name: Leaf route add failed — continuing
+          debug:
+            msg: "Leaf route block failed on {{ inventory_hostname }}, continuing"
+
+    - name: Save SONiC config on leaf
+      shell: config save -y
+      changed_when: true
+
+    - name: Verify VLAN member is present
+      shell: show vlan brief
+      register: vlan_output
+      changed_when: false
+
+    - name: Show VLAN brief output
+      debug:
+        var: vlan_output.stdout

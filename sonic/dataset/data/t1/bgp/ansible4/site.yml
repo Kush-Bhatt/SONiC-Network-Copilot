@@ -1,0 +1,276 @@
+---
+########################################
+# Leaf-Spine BGP Automation — template-driven style (corrected)
+# Pipes config directly into vtysh stdin to avoid the
+# host-filesystem vs FRR-container boundary issue.
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        bgp_asn: 65000
+        router_id: 10.0.0.3
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        neighbors:
+          - { ip: 10.0.13.1, remote_asn: 65001, desc: VS-1-Leaf1 }
+          - { ip: 10.0.23.1, remote_asn: 65002, desc: VS-2-Leaf2 }
+      vs-4:
+        bgp_asn: 65000
+        router_id: 10.0.0.4
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        neighbors:
+          - { ip: 10.0.14.1, remote_asn: 65001, desc: VS-1-Leaf1 }
+          - { ip: 10.0.24.1, remote_asn: 65002, desc: VS-2-Leaf2 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Remove existing IPs on spine links
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+        fi
+      loop: "{{ my_config.links }}"
+      ignore_errors: true
+
+    - name: Assign IPs on spine inter-switch links
+      shell: config interface ip add {{ item.iface }} {{ item.ip }}
+      loop: "{{ my_config.links }}"
+
+    - name: Remove existing BGP config on spine
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ my_config.bgp_asn }}" -c "end"
+      ignore_errors: true
+
+    - name: Build and load BGP config on spine via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp {{ my_config.bgp_asn }}'
+          echo ' bgp router-id {{ my_config.router_id }}'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor {{ my_config.neighbors[0].ip }} remote-as {{ my_config.neighbors[0].remote_asn }}'
+          echo ' neighbor {{ my_config.neighbors[0].ip }} description {{ my_config.neighbors[0].desc }}'
+          echo ' neighbor {{ my_config.neighbors[0].ip }} timers 3 9'
+          echo ' neighbor {{ my_config.neighbors[1].ip }} remote-as {{ my_config.neighbors[1].remote_asn }}'
+          echo ' neighbor {{ my_config.neighbors[1].ip }} description {{ my_config.neighbors[1].desc }}'
+          echo ' neighbor {{ my_config.neighbors[1].ip }} timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  neighbor {{ my_config.neighbors[0].ip }} activate'
+          echo '  neighbor {{ my_config.neighbors[0].ip }} soft-reconfiguration inbound'
+          echo '  neighbor {{ my_config.neighbors[1].ip }} activate'
+          echo '  neighbor {{ my_config.neighbors[1].ip }} soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Save SONiC config on spine
+      shell: config save -y
+
+    - name: Show ip interfaces on spine
+      shell: show ip interfaces
+      register: iface_out
+
+    - name: Print ip interfaces on spine
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on spine
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on spine
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-1 Leaf (with loopback advertisement)
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 10.1.0.1
+    loopback_ip: 10.1.0.1/32
+    advertise_prefix: 10.1.0.1/32
+    links:
+      - { iface: Ethernet12, ip: 10.0.13.1/30 }
+      - { iface: Ethernet16, ip: 10.0.14.1/30 }
+    neighbors:
+      - { ip: 10.0.13.2, remote_asn: 65000, desc: VS-3-Spine1 }
+      - { ip: 10.0.14.2, remote_asn: 65000, desc: VS-4-Spine2 }
+
+  tasks:
+    - name: Remove existing IPs on VS-1 links
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+        fi
+      loop: "{{ links }}"
+      ignore_errors: true
+
+    - name: Assign IPs on VS-1 inter-switch links
+      shell: config interface ip add {{ item.iface }} {{ item.ip }}
+      loop: "{{ links }}"
+
+    - name: Remove ALL existing Loopback0 IPs on VS-1
+      shell: |
+        for ip in $(show ip interfaces | grep "Loopback0" | awk '{print $2}'); do
+          config interface ip remove Loopback0 $ip
+        done
+      ignore_errors: true
+
+    - name: Add Loopback0 IP on VS-1
+      shell: config interface ip add Loopback0 {{ loopback_ip }}
+
+    - name: Remove existing BGP config on VS-1
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      ignore_errors: true
+
+    - name: Build and load BGP config on VS-1 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp {{ bgp_asn }}'
+          echo ' bgp router-id {{ router_id }}'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor {{ neighbors[0].ip }} remote-as {{ neighbors[0].remote_asn }}'
+          echo ' neighbor {{ neighbors[0].ip }} description {{ neighbors[0].desc }}'
+          echo ' neighbor {{ neighbors[0].ip }} timers 3 9'
+          echo ' neighbor {{ neighbors[1].ip }} remote-as {{ neighbors[1].remote_asn }}'
+          echo ' neighbor {{ neighbors[1].ip }} description {{ neighbors[1].desc }}'
+          echo ' neighbor {{ neighbors[1].ip }} timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  network {{ advertise_prefix }}'
+          echo '  neighbor {{ neighbors[0].ip }} activate'
+          echo '  neighbor {{ neighbors[0].ip }} soft-reconfiguration inbound'
+          echo '  neighbor {{ neighbors[1].ip }} activate'
+          echo '  neighbor {{ neighbors[1].ip }} soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Save SONiC config on VS-1
+      shell: config save -y
+
+    - name: Show ip interfaces on VS-1
+      shell: show ip interfaces
+      register: iface_out
+
+    - name: Print ip interfaces on VS-1
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout
+
+    - name: Show ip route on VS-1
+      shell: ip route
+      register: route_out
+
+    - name: Print ip route on VS-1
+      debug:
+        var: route_out.stdout
+
+
+- name: Configure VS-2 Leaf (no loopback)
+  hosts: vs-2
+  gather_facts: false
+  vars:
+    bgp_asn: 65002
+    router_id: 10.0.23.1
+    links:
+      - { iface: Ethernet12, ip: 10.0.24.1/30 }
+      - { iface: Ethernet16, ip: 10.0.23.1/30 }
+    neighbors:
+      - { ip: 10.0.24.2, remote_asn: 65000, desc: VS-4-Spine2 }
+      - { ip: 10.0.23.2, remote_asn: 65000, desc: VS-3-Spine1 }
+
+  tasks:
+    - name: Remove existing IPs on VS-2 links
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+        fi
+      loop: "{{ links }}"
+      ignore_errors: true
+
+    - name: Assign IPs on VS-2 inter-switch links
+      shell: config interface ip add {{ item.iface }} {{ item.ip }}
+      loop: "{{ links }}"
+
+    - name: Remove ALL existing Loopback0 IPs on VS-2
+      shell: |
+        for ip in $(show ip interfaces | grep "Loopback0" | awk '{print $2}'); do
+          config interface ip remove Loopback0 $ip
+        done
+      ignore_errors: true
+
+    - name: Remove existing BGP config on VS-2
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      ignore_errors: true
+
+    - name: Build and load BGP config on VS-2 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp {{ bgp_asn }}'
+          echo ' bgp router-id {{ router_id }}'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor {{ neighbors[0].ip }} remote-as {{ neighbors[0].remote_asn }}'
+          echo ' neighbor {{ neighbors[0].ip }} description {{ neighbors[0].desc }}'
+          echo ' neighbor {{ neighbors[0].ip }} timers 3 9'
+          echo ' neighbor {{ neighbors[1].ip }} remote-as {{ neighbors[1].remote_asn }}'
+          echo ' neighbor {{ neighbors[1].ip }} description {{ neighbors[1].desc }}'
+          echo ' neighbor {{ neighbors[1].ip }} timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  neighbor {{ neighbors[0].ip }} activate'
+          echo '  neighbor {{ neighbors[0].ip }} soft-reconfiguration inbound'
+          echo '  neighbor {{ neighbors[1].ip }} activate'
+          echo '  neighbor {{ neighbors[1].ip }} soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Save SONiC config on VS-2
+      shell: config save -y
+
+    - name: Show ip interfaces on VS-2
+      shell: show ip interfaces
+      register: iface_out
+
+    - name: Print ip interfaces on VS-2
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on VS-2
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-2
+      debug:
+        var: bgp_out.stdout

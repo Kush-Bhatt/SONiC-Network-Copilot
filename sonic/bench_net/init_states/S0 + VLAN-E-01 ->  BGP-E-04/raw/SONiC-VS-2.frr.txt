@@ -1,0 +1,96 @@
+!
+!
+no ipv6 nht resolve-via-default
+!
+ip prefix-list DEFAULT_IPV4 seq 5 permit 0.0.0.0/0
+ip prefix-list LOCAL_VLAN_IPV4_PREFIX seq 5 permit 10.110.2.0/24
+ip prefix-list PL_LoopbackV4 seq 5 permit 10.1.0.1/32
+!
+ipv6 prefix-list DEFAULT_IPV6 seq 5 permit ::/0
+!
+route-map ALLOW_LIST_DEPLOYMENT_ID_0_V4 permit 65535
+ set community 5060:12345 additive
+exit
+!
+route-map ALLOW_LIST_DEPLOYMENT_ID_0_V6 permit 65535
+ set community 5060:12345 additive
+exit
+!
+route-map CHECK_IDF_ISOLATION permit 10
+exit
+!
+route-map FROM_BGP_PEER_UNNUMBERED_V4 permit 100
+exit
+!
+route-map FROM_BGP_PEER_UNNUMBERED_V6 permit 100
+exit
+!
+route-map FROM_BGP_PEER_V4 permit 10
+ call ALLOW_LIST_DEPLOYMENT_ID_0_V4
+ on-match next
+exit
+!
+route-map FROM_BGP_PEER_V4 permit 11
+ match community allow_list_default_community
+exit
+!
+route-map FROM_BGP_PEER_V4 permit 100
+exit
+!
+route-map FROM_BGP_PEER_V6 permit 1
+ on-match next
+ set ipv6 next-hop prefer-global
+exit
+!
+route-map FROM_BGP_PEER_V6 permit 10
+ call ALLOW_LIST_DEPLOYMENT_ID_0_V6
+ on-match next
+exit
+!
+route-map FROM_BGP_PEER_V6 permit 11
+ match community allow_list_default_community
+exit
+!
+route-map FROM_BGP_PEER_V6 permit 100
+exit
+!
+route-map PERMIT-ALL permit 10
+exit
+!
+route-map RM_SET_SRC permit 10
+ set src 10.1.0.1
+exit
+!
+route-map TO_BGP_PEER_UNNUMBERED_V4 permit 100
+ call CHECK_IDF_ISOLATION
+exit
+!
+route-map TO_BGP_PEER_UNNUMBERED_V6 permit 100
+ call CHECK_IDF_ISOLATION
+exit
+!
+route-map TO_BGP_PEER_V4 permit 100
+ call CHECK_IDF_ISOLATION
+exit
+!
+route-map TO_BGP_PEER_V6 permit 100
+ call CHECK_IDF_ISOLATION
+exit
+!
+!
+router bgp 65002
+ neighbor 10.2.2.1 remote-as 65100
+!
+ address-family ipv4 unicast
+  network 10.110.2.0/24
+  neighbor 10.2.2.1 route-map PERMIT-ALL out
+ exit-address-family
+exit
+!
+bgp community-list standard allow_list_default_community seq 5 permit no-export
+bgp community-list standard allow_list_default_community seq 10 permit 5060:12345
+!
+ip protocol bgp route-map RM_SET_SRC
+!
+!
+end

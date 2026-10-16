@@ -1,0 +1,60 @@
+---
+########################################
+# Single Switch BGP Automation — register/when chaining style
+# VS-1 = ASN 65001
+########################################
+- name: Configure BGP on VS-1
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 192.168.100.2
+    neighbor_ip: 10.0.0.1
+    neighbor_asn: 65002
+    neighbor_desc: to-vs-3
+    advertise_prefix: 192.168.10.0/24
+
+  tasks:
+    - name: Check if BGP instance already exists on VS-1
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-1
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp {{ bgp_asn }}" \
+              -c "bgp router-id {{ router_id }}" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor {{ neighbor_ip }} remote-as {{ neighbor_asn }}" \
+              -c "neighbor {{ neighbor_ip }} description {{ neighbor_desc }}" \
+              -c "neighbor {{ neighbor_ip }} timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "network {{ advertise_prefix }}" \
+              -c "neighbor {{ neighbor_ip }} activate" \
+              -c "neighbor {{ neighbor_ip }} soft-reconfiguration inbound" \
+              -c "end"
+      changed_when: true
+
+    - name: Save FRR config on VS-1
+      shell: vtysh -c "write memory"
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout

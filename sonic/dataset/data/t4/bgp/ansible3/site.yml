@@ -1,0 +1,154 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 10.0.23.1
+        - 10.0.23.2
+      changed_when: false
+
+- name: Validate all BGP variables before touching anything
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+  tasks:
+
+    - name: Assert required BGP variables are defined
+      ansible.builtin.assert:
+        that:
+          - bgp_asn is defined
+          - bgp_router_id is defined
+          - bgp_neighbors is defined
+          - bgp_neighbors | length > 0
+          - bgp_networks is defined
+        fail_msg: "{{ inventory_hostname }} is missing required BGP variables — aborting"
+        success_msg: "{{ inventory_hostname }} BGP variables validated OK"
+
+    - name: Assert each neighbor has peer_ip and remote_as
+      ansible.builtin.assert:
+        that:
+          - item.peer_ip is defined
+          - item.remote_as is defined
+        fail_msg: "BGP neighbor entry missing peer_ip or remote_as on {{ inventory_hostname }}"
+      loop: "{{ bgp_neighbors }}"
+
+    - name: Assert each network is a valid string
+      ansible.builtin.assert:
+        that:
+          - item is string
+          - item | length > 0
+        fail_msg: "BGP network entry invalid on {{ inventory_hostname }}"
+      loop: "{{ bgp_networks }}"
+      when: bgp_networks | length > 0
+
+    - name: Build BGP config summary fact
+      ansible.builtin.set_fact:
+        bgp_summary_fact:
+          host: "{{ inventory_hostname }}"
+          asn: "{{ bgp_asn }}"
+          router_id: "{{ bgp_router_id }}"
+          neighbor_count: "{{ bgp_neighbors | length }}"
+          network_count: "{{ bgp_networks | length }}"
+          neighbors: "{{ bgp_neighbors | map(attribute='peer_ip') | list }}"
+          networks: "{{ bgp_networks }}"
+
+    - name: Print BGP config summary before pushing
+      ansible.builtin.debug:
+        var: bgp_summary_fact
+
+- name: Configure BGP on SONiC switches — validate-first style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 1. BGP CONFIGURATION ────────────────────────────
+    - name: Remove existing BGP config to apply cleanly
+      ansible.builtin.shell: |
+        existing=$(sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "^router bgp {{ bgp_asn }}" || true)
+        if [ "$existing" != "0" ]; then
+          sudo vtysh -c "configure terminal" \
+                     -c "no router bgp {{ bgp_asn }}" \
+                     -c "end" \
+                     -c "write memory" && echo changed
+        else
+          echo ok
+        fi
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Configure BGP router and router-id
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "router bgp {{ bgp_asn }}" \
+                   -c "bgp router-id {{ bgp_router_id }}" \
+                   -c "no bgp ebgp-requires-policy" \
+                   -c "end" \
+                   -c "write memory"
+      changed_when: true
+
+    - name: Add BGP neighbors
+      ansible.builtin.shell: |
+        existing=$(sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "neighbor {{ item.peer_ip }} remote-as {{ item.remote_as }}" || true)
+        if [ "$existing" = "0" ]; then
+          sudo vtysh -c "configure terminal" \
+                     -c "router bgp {{ bgp_asn }}" \
+                     -c "neighbor {{ item.peer_ip }} remote-as {{ item.remote_as }}" \
+                     -c "end" \
+                     -c "write memory" && echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ bgp_neighbors }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Advertise BGP networks
+      ansible.builtin.shell: |
+        existing=$(sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "network {{ item }}" || true)
+        if [ "$existing" = "0" ]; then
+          sudo vtysh -c "configure terminal" \
+                     -c "router bgp {{ bgp_asn }}" \
+                     -c "address-family ipv4 unicast" \
+                     -c "network {{ item }}" \
+                     -c "exit" \
+                     -c "end" \
+                     -c "write memory" && echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ bgp_networks }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: bgp_networks | length > 0
+
+    # ── 2. WAIT FOR BGP TO ESTABLISH ────────────────────
+    - name: Wait 15 seconds for BGP to establish
+      ansible.builtin.pause:
+        seconds: 15
+
+    # ── 3. VERIFY ───────────────────────────────────────
+    - name: Collect and register all verification output
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop:
+        - { cmd: "sudo vtysh -c 'show ip bgp summary'",   label: "BGP summary" }
+        - { cmd: "sudo vtysh -c 'show ip bgp neighbors'", label: "BGP neighbors" }
+        - { cmd: "ip route",                              label: "IP route" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print all verification results for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── {{ item.item.label }} ──"
+          - "{{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

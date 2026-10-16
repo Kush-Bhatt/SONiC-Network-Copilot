@@ -1,0 +1,192 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 192.168.100.2
+        - 192.168.100.3
+        - 192.168.100.4
+      changed_when: false
+
+- name: Configure all SONiC switches — block/rescue style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 0. PRE-CLEAN ────────────────────────────────────
+    - name: Pre-clean bare INTERFACE entries
+      block:
+        - name: Remove IP entries for {{ item }}
+          ansible.builtin.shell: |
+            for key in $(sonic-db-cli CONFIG_DB keys "INTERFACE|{{ item }}|*" 2>/dev/null); do
+              ip=$(echo "$key" | awk -F'|' '{print $3}')
+              sudo config interface ip remove {{ item }} "$ip" 2>/dev/null || true
+            done
+            sonic-db-cli CONFIG_DB del "INTERFACE|{{ item }}" 2>/dev/null || true
+          loop: "{{ interfaces_to_clean }}"
+          changed_when: true
+      rescue:
+        - name: Pre-clean failed — continuing
+          ansible.builtin.debug:
+            msg: "Pre-clean on {{ inventory_hostname }} had errors, continuing"
+
+    # ── 1. PORTCHANNELS ─────────────────────────────────
+    - name: Configure PortChannels
+      block:
+        - name: Create PortChannel {{ item.name }}
+          ansible.builtin.raw: "sudo config portchannel add {{ item.name }}"
+          loop: "{{ portchannels }}"
+          loop_control:
+            label: "{{ item.name }}"
+          changed_when: true
+
+        - name: Add member {{ item.member }} to {{ item.name }}
+          ansible.builtin.raw: "sudo config portchannel member add {{ item.name }} {{ item.member }}"
+          loop: "{{ portchannels }}"
+          loop_control:
+            label: "{{ item.member }} -> {{ item.name }}"
+          changed_when: true
+
+        - name: Assign IP {{ item.ip }} to {{ item.name }}
+          ansible.builtin.raw: "sudo config interface ip add {{ item.name }} {{ item.ip }}"
+          loop: "{{ portchannels }}"
+          loop_control:
+            label: "{{ item.name }} {{ item.ip }}"
+          changed_when: true
+      rescue:
+        - name: PortChannel config failed — continuing
+          ansible.builtin.debug:
+            msg: "PortChannel block failed on {{ inventory_hostname }}, continuing"
+
+    # ── 2. LOOPBACK ─────────────────────────────────────
+    - name: Configure loopback
+      block:
+        - name: Create loopback {{ loopback.name }}
+          ansible.builtin.raw: "sudo config loopback add {{ loopback.name }}"
+          changed_when: true
+
+        - name: Assign IP {{ loopback.ip }} to {{ loopback.name }}
+          ansible.builtin.raw: "sudo config interface ip add {{ loopback.name }} {{ loopback.ip }}"
+          changed_when: true
+      rescue:
+        - name: Loopback config failed — continuing
+          ansible.builtin.debug:
+            msg: "Loopback block failed on {{ inventory_hostname }}, continuing"
+
+    # ── 3. VLAN — VS-1 and VS-2 only ───────────────────
+    - name: Configure VLAN
+      when: vlan is defined
+      block:
+        - name: Create Vlan{{ vlan.id }}
+          ansible.builtin.raw: "sudo config vlan add {{ vlan.id }}"
+          changed_when: true
+
+        - name: Add {{ item.port }} to Vlan{{ vlan.id }} untagged
+          ansible.builtin.raw: "sudo config vlan member add {{ vlan.id }} {{ item.port }} --untagged"
+          loop: "{{ vlan.members }}"
+          loop_control:
+            label: "{{ item.port }}"
+          changed_when: true
+
+        - name: Set MTU 1500 on {{ item.port }}
+          ansible.builtin.raw: "sudo config interface mtu {{ item.port }} 1500"
+          loop: "{{ vlan.members }}"
+          loop_control:
+            label: "{{ item.port }}"
+          changed_when: true
+
+        - name: Assign SVI IP {{ vlan.ip }} to Vlan{{ vlan.id }}
+          ansible.builtin.raw: "sudo config interface ip add Vlan{{ vlan.id }} {{ vlan.ip }}"
+          changed_when: true
+      rescue:
+        - name: VLAN config failed — continuing
+          ansible.builtin.debug:
+            msg: "VLAN block failed on {{ inventory_hostname }}, continuing"
+
+    # ── 4. ROUTED INTERFACES — VS-3 only ───────────────
+    - name: Configure routed interfaces
+      when: routed_interfaces is defined
+      block:
+        - name: Assign IP {{ item.ip }} to {{ item.name }}
+          ansible.builtin.raw: "sudo config interface ip add {{ item.name }} {{ item.ip }}"
+          loop: "{{ routed_interfaces }}"
+          loop_control:
+            label: "{{ item.name }} {{ item.ip }}"
+          changed_when: true
+
+        - name: Set MTU 1500 on {{ item.name }}
+          ansible.builtin.raw: "sudo config interface mtu {{ item.name }} 1500"
+          loop: "{{ routed_interfaces }}"
+          loop_control:
+            label: "{{ item.name }}"
+          changed_when: true
+      rescue:
+        - name: Routed interface config failed — continuing
+          ansible.builtin.debug:
+            msg: "Routed interface block failed on {{ inventory_hostname }}, continuing"
+
+    # ── 5. STATIC ROUTES ────────────────────────────────
+    - name: Configure static routes
+      block:
+        - name: Add route {{ item.prefix }} via {{ item.nexthop }}
+          ansible.builtin.raw: "sudo config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}"
+          loop: "{{ static_routes }}"
+          loop_control:
+            label: "{{ item.prefix }} via {{ item.nexthop }}"
+          changed_when: true
+      rescue:
+        - name: Static route config failed — continuing
+          ansible.builtin.debug:
+            msg: "Static route block failed on {{ inventory_hostname }}, continuing"
+
+    # ── 6. DISABLE rp_filter ────────────────────────────
+    - name: Disable rp_filter on all interfaces
+      ansible.builtin.shell: |
+        echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter
+        echo 0 > /proc/sys/net/ipv4/conf/default/rp_filter
+        for iface in $(ls /proc/sys/net/ipv4/conf/); do
+          echo 0 > /proc/sys/net/ipv4/conf/$iface/rp_filter 2>/dev/null || true
+        done
+      changed_when: true
+
+    - name: Persist rp_filter disable across reboots
+      ansible.builtin.shell: |
+        grep -q "net.ipv4.conf.all.rp_filter" /etc/sysctl.conf 2>/dev/null && \
+          sed -i 's/net.ipv4.conf.all.rp_filter.*/net.ipv4.conf.all.rp_filter = 0/' /etc/sysctl.conf || \
+          echo "net.ipv4.conf.all.rp_filter = 0" >> /etc/sysctl.conf
+        grep -q "net.ipv4.conf.default.rp_filter" /etc/sysctl.conf 2>/dev/null && \
+          sed -i 's/net.ipv4.conf.default.rp_filter.*/net.ipv4.conf.default.rp_filter = 0/' /etc/sysctl.conf || \
+          echo "net.ipv4.conf.default.rp_filter = 0" >> /etc/sysctl.conf
+      changed_when: true
+
+    # ── 7. SAVE ─────────────────────────────────────────
+    - name: Save configuration
+      ansible.builtin.raw: "sudo config save -y"
+      changed_when: true
+
+    # ── 8. VERIFY ───────────────────────────────────────
+    - name: Collect verification output
+      ansible.builtin.raw: "{{ item.cmd }}"
+      loop:
+        - { cmd: "show ip interfaces",                       label: "IP interfaces" }
+        - { cmd: "show ip route",                            label: "IP routes" }
+        - { cmd: "show vlan brief",                          label: "VLAN brief" }
+        - { cmd: "show interface portchannel",               label: "PortChannels" }
+        - { cmd: "sudo vtysh -c 'show running-config'",      label: "FRR config" }
+        - { cmd: "cat /proc/sys/net/ipv4/conf/all/rp_filter", label: "rp_filter" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print verification for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── {{ item.item.label }} ──"
+          - "{{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

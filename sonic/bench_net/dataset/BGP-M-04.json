@@ -1,0 +1,261 @@
+{
+  "id": "BGP-M-04",
+  "query": "On L1, create a prefix-list permitting exactly 10.100.1.0/24, wrap it in a route-map, and apply it outbound to both spine neighbours. Advertisements must be unchanged afterwards.",
+  "category": "bgp",
+  "topology": "2-leaves-2-spine",
+  "init_state": "S0 + VLAN-E-01 ->  BGP-E-04",
+  "reference_playbook": "---\n- name: Agentic-SONiC bench_net dataset item - BGP-M-04\n  hosts: sonic_switches\n  gather_facts: false\n  become: true\n  become_method: sudo\n  tasks:\n\n    # -----------------------------------------------------------------\n    # PRE-CHECKS\n    # -----------------------------------------------------------------\n\n    - name: Verify L1 (SONiC-VS-1) is running AS 65001\n      raw: sudo vtysh -c \"show ip bgp summary\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_bgp_precheck\n      failed_when: >-\n        l1_bgp_precheck.rc != 0\n        or 'local AS number 65001' not in l1_bgp_precheck.stdout\n      changed_when: false\n\n    - name: Verify L1-S1 BGP session is Established before change\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.1.1\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s1_state_precheck\n      failed_when: >-\n        l1_s1_state_precheck.rc != 0\n        or 'established' not in l1_s1_state_precheck.stdout | lower\n      changed_when: false\n\n    - name: Verify L1-S2 BGP session is Established before change\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.2.1\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s2_state_precheck\n      failed_when: >-\n        l1_s2_state_precheck.rc != 0\n        or 'established' not in l1_s2_state_precheck.stdout | lower\n      changed_when: false\n\n    - name: Verify S2-L2 BGP session is Established before change\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.2.2.0\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_l2_state_precheck\n      failed_when: >-\n        s2_l2_state_precheck.rc != 0\n        or 'established' not in s2_l2_state_precheck.stdout | lower\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Capture pre-change BGP uptime for the three sessions.\n    # -----------------------------------------------------------------\n\n    - name: Capture pre-change L1-S1 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.1.1.1\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s1_uptime_pre\n      failed_when: l1_s1_uptime_pre.rc != 0 or l1_s1_uptime_pre.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture pre-change L1-S2 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.1.2.1\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s2_uptime_pre\n      failed_when: l1_s2_uptime_pre.rc != 0 or l1_s2_uptime_pre.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture pre-change S2-L2 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.2.2.0\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_l2_uptime_pre\n      failed_when: s2_l2_uptime_pre.rc != 0 or s2_l2_uptime_pre.stdout | trim == ''\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Capture current advertised-prefix counts.\n    # These are used to verify advertisements are unchanged afterwards.\n    # -----------------------------------------------------------------\n\n    - name: Capture pre-change advertisement count to S1\n      raw: >-\n        sudo vtysh -c \"show ip bgp neighbors 10.1.1.1 advertised-routes\"\n        | awk '/Total number of prefixes/ {print $5}' | tr -d ','\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s1_count_pre\n      failed_when: l1_adv_s1_count_pre.rc != 0 or l1_adv_s1_count_pre.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture pre-change advertisement count to S2\n      raw: >-\n        sudo vtysh -c \"show ip bgp neighbors 10.1.2.1 advertised-routes\"\n        | awk '/Total number of prefixes/ {print $5}' | tr -d ','\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s2_count_pre\n      failed_when: l1_adv_s2_count_pre.rc != 0 or l1_adv_s2_count_pre.stdout | trim == ''\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # REAL CHANGE 1:\n    # Create/update exact prefix-list entry.\n    # -----------------------------------------------------------------\n\n    - name: Configure PL-EXPORT on L1\n      raw: >-\n        sudo vtysh -c \"configure terminal\"\n        -c \"ip prefix-list PL-EXPORT seq 10 permit 10.100.1.0/24\"\n        -c \"exit\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      ignore_errors: true\n\n    # -----------------------------------------------------------------\n    # VERIFY immediately after real change 1.\n    # -----------------------------------------------------------------\n\n    - name: Verify PL-EXPORT on L1\n      raw: sudo vtysh -c \"show running-config\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_pl_verify\n      failed_when: >-\n        l1_pl_verify.rc != 0\n        or 'ip prefix-list PL-EXPORT seq 10 permit 10.100.1.0/24' not in l1_pl_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # REAL CHANGE 2:\n    # Create/update route-map.\n    # -----------------------------------------------------------------\n\n    - name: Configure RM-EXPORT on L1\n      raw: >-\n        sudo vtysh -c \"configure terminal\"\n        -c \"route-map RM-EXPORT permit 10\"\n        -c \"match ip address prefix-list PL-EXPORT\"\n        -c \"exit\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      ignore_errors: true\n\n    # -----------------------------------------------------------------\n    # VERIFY immediately after real change 2.\n    # -----------------------------------------------------------------\n\n    - name: Verify RM-EXPORT on L1\n      raw: sudo vtysh -c \"show running-config\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_rm_verify\n      failed_when: >-\n        l1_rm_verify.rc != 0\n        or 'route-map RM-EXPORT permit 10' not in l1_rm_verify.stdout\n        or 'match ip address prefix-list PL-EXPORT' not in l1_rm_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # REAL CHANGE 3:\n    # Apply RM-EXPORT outbound to S1.\n    # -----------------------------------------------------------------\n\n    - name: Apply RM-EXPORT outbound to S1\n      raw: >-\n        sudo vtysh -c \"configure terminal\"\n        -c \"router bgp 65001\"\n        -c \"address-family ipv4 unicast\"\n        -c \"neighbor 10.1.1.1 route-map RM-EXPORT out\"\n        -c \"exit-address-family\"\n        -c \"exit\"\n        -c \"write memory\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      ignore_errors: true\n\n    # -----------------------------------------------------------------\n    # VERIFY immediately after real change 3.\n    # -----------------------------------------------------------------\n\n    - name: Verify RM-EXPORT is applied outbound to S1\n      raw: sudo vtysh -c \"show running-config\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s1_policy_verify\n      failed_when: >-\n        l1_s1_policy_verify.rc != 0\n        or 'neighbor 10.1.1.1 route-map RM-EXPORT out' not in l1_s1_policy_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # REAL CHANGE 4:\n    # Apply RM-EXPORT outbound to S2.\n    # -----------------------------------------------------------------\n\n    - name: Apply RM-EXPORT outbound to S2\n      raw: >-\n        sudo vtysh -c \"configure terminal\"\n        -c \"router bgp 65001\"\n        -c \"address-family ipv4 unicast\"\n        -c \"neighbor 10.1.2.1 route-map RM-EXPORT out\"\n        -c \"exit-address-family\"\n        -c \"exit\"\n        -c \"write memory\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      ignore_errors: true\n\n    # -----------------------------------------------------------------\n    # VERIFY immediately after real change 4.\n    # -----------------------------------------------------------------\n\n    - name: Verify RM-EXPORT is applied outbound to S2\n      raw: sudo vtysh -c \"show running-config\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s2_policy_verify\n      failed_when: >-\n        l1_s2_policy_verify.rc != 0\n        or 'neighbor 10.1.2.1 route-map RM-EXPORT out' not in l1_s2_policy_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # VERIFY final L1 advertisements are unchanged.\n    # -----------------------------------------------------------------\n\n    - name: Verify L1 still advertises 10.100.1.0/24 to S1\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.1.1 advertised-routes\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s1_after\n      until: >-\n        l1_adv_s1_after.rc == 0\n        and '10.100.1.0/24' in l1_adv_s1_after.stdout\n      retries: 6\n      delay: 2\n      failed_when: >-\n        l1_adv_s1_after.rc != 0\n        or '10.100.1.0/24' not in l1_adv_s1_after.stdout\n      changed_when: false\n\n    - name: Verify L1 still advertises 10.100.1.0/24 to S2\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.2.1 advertised-routes\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s2_after\n      until: >-\n        l1_adv_s2_after.rc == 0\n        and '10.100.1.0/24' in l1_adv_s2_after.stdout\n      retries: 6\n      delay: 2\n      failed_when: >-\n        l1_adv_s2_after.rc != 0\n        or '10.100.1.0/24' not in l1_adv_s2_after.stdout\n      changed_when: false\n\n    - name: Capture post-change advertisement count to S1\n      raw: >-\n        sudo vtysh -c \"show ip bgp neighbors 10.1.1.1 advertised-routes\"\n        | awk '/Total number of prefixes/ {print $5}' | tr -d ','\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s1_count_post\n      failed_when: l1_adv_s1_count_post.rc != 0 or l1_adv_s1_count_post.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture post-change advertisement count to S2\n      raw: >-\n        sudo vtysh -c \"show ip bgp neighbors 10.1.2.1 advertised-routes\"\n        | awk '/Total number of prefixes/ {print $5}' | tr -d ','\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_adv_s2_count_post\n      failed_when: l1_adv_s2_count_post.rc != 0 or l1_adv_s2_count_post.stdout | trim == ''\n      changed_when: false\n\n    - name: Verify advertisement count to S1 is unchanged\n      assert:\n        that:\n          - (l1_adv_s1_count_pre.stdout | trim | int) == (l1_adv_s1_count_post.stdout | trim | int)\n        fail_msg: >-\n          Advertisement count to S1 changed from\n          {{ l1_adv_s1_count_pre.stdout | trim }}\n          to\n          {{ l1_adv_s1_count_post.stdout | trim }}\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    - name: Verify advertisement count to S2 is unchanged\n      assert:\n        that:\n          - (l1_adv_s2_count_pre.stdout | trim | int) == (l1_adv_s2_count_post.stdout | trim | int)\n        fail_msg: >-\n          Advertisement count to S2 changed from\n          {{ l1_adv_s2_count_pre.stdout | trim }}\n          to\n          {{ l1_adv_s2_count_post.stdout | trim }}\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    # -----------------------------------------------------------------\n    # VERIFY S1 and S2 still receive the prefix.\n    # -----------------------------------------------------------------\n\n    - name: Verify S1 still receives 10.100.1.0/24 from L1\n      raw: sudo vtysh -c \"show ip bgp 10.100.1.0/24\"\n      when: inventory_hostname == \"SONiC-VS-5\"\n      register: s1_route_verify\n      until: >-\n        s1_route_verify.rc == 0\n        and '10.100.1.0/24' in s1_route_verify.stdout\n      retries: 6\n      delay: 2\n      failed_when: >-\n        s1_route_verify.rc != 0\n        or '10.100.1.0/24' not in s1_route_verify.stdout\n        or '65001' not in s1_route_verify.stdout\n      changed_when: false\n\n    - name: Verify S2 still receives 10.100.1.0/24 from L1\n      raw: sudo vtysh -c \"show ip bgp 10.100.1.0/24\"\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_route_verify\n      until: >-\n        s2_route_verify.rc == 0\n        and '10.100.1.0/24' in s2_route_verify.stdout\n      retries: 6\n      delay: 2\n      failed_when: >-\n        s2_route_verify.rc != 0\n        or '10.100.1.0/24' not in s2_route_verify.stdout\n        or '65001' not in s2_route_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # VERIFY the three sessions remain Established.\n    # -----------------------------------------------------------------\n\n    - name: Verify L1-S1 session remains Established\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.1.1\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s1_state_postcheck\n      failed_when: >-\n        l1_s1_state_postcheck.rc != 0\n        or 'established' not in l1_s1_state_postcheck.stdout | lower\n      changed_when: false\n\n    - name: Verify L1-S2 session remains Established\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.1.2.1\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s2_state_postcheck\n      failed_when: >-\n        l1_s2_state_postcheck.rc != 0\n        or 'established' not in l1_s2_state_postcheck.stdout | lower\n      changed_when: false\n\n    - name: Verify S2-L2 session remains Established\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.2.2.0\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_l2_state_postcheck\n      failed_when: >-\n        s2_l2_state_postcheck.rc != 0\n        or 'established' not in s2_l2_state_postcheck.stdout | lower\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Capture post-change uptimes and verify continuous uptime.\n    # -----------------------------------------------------------------\n\n    - name: Capture post-change L1-S1 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.1.1.1\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s1_uptime_post\n      failed_when: l1_s1_uptime_post.rc != 0 or l1_s1_uptime_post.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture post-change L1-S2 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.1.2.1\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: l1_s2_uptime_post\n      failed_when: l1_s2_uptime_post.rc != 0 or l1_s2_uptime_post.stdout | trim == ''\n      changed_when: false\n\n    - name: Capture post-change S2-L2 uptime\n      raw: sudo vtysh -c \"show ip bgp summary\" | awk '$1==\"10.2.2.0\" {print $9}'\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_l2_uptime_post\n      failed_when: s2_l2_uptime_post.rc != 0 or s2_l2_uptime_post.stdout | trim == ''\n      changed_when: false\n\n    - name: Verify L1-S1 uptime did not reset\n      assert:\n        that:\n          - (l1_s1_uptime_pre.stdout | trim) == (l1_s1_uptime_post.stdout | trim)\n        fail_msg: >-\n          L1-S1 uptime changed from\n          {{ l1_s1_uptime_pre.stdout | trim }}\n          to\n          {{ l1_s1_uptime_post.stdout | trim }}\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    - name: Verify L1-S2 uptime did not reset\n      assert:\n        that:\n          - (l1_s2_uptime_pre.stdout | trim) == (l1_s2_uptime_post.stdout | trim)\n        fail_msg: >-\n          L1-S2 uptime changed from\n          {{ l1_s2_uptime_pre.stdout | trim }}\n          to\n          {{ l1_s2_uptime_post.stdout | trim }}\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    - name: Verify S2-L2 uptime did not reset\n      assert:\n        that:\n          - (s2_l2_uptime_pre.stdout | trim) == (s2_l2_uptime_post.stdout | trim)\n        fail_msg: >-\n          S2-L2 uptime changed from\n          {{ s2_l2_uptime_pre.stdout | trim }}\n          to\n          {{ s2_l2_uptime_post.stdout | trim }}\n      when: inventory_hostname == \"SONiC-VS-6\"\n\n    # -----------------------------------------------------------------\n    # Final display\n    # -----------------------------------------------------------------\n\n    - name: Display final S1 advertisement\n      debug:\n        var: l1_adv_s1_after.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    - name: Display final S2 advertisement\n      debug:\n        var: l1_adv_s2_after.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-1\"\n\n    - name: Display final S1 route\n      debug:\n        var: s1_route_verify.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-5\"\n\n    - name: Display final S2 route\n      debug:\n        var: s2_route_verify.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-6\"",
+  "expected_diff": [
+    {
+      "id": "bgp_neighbor:sonic-vs-1:sonic-vs-1:10.1.1.1",
+      "table": "bgp_neighbor",
+      "node": "sonic-vs-1",
+      "change": "modified",
+      "detail": {
+        "Export_Policy": {
+          "old": [
+            "PERMIT-ALL"
+          ],
+          "new": [
+            "RM-EXPORT"
+          ]
+        }
+      }
+    },
+    {
+      "id": "bgp_neighbor:sonic-vs-1:sonic-vs-1:10.1.2.1",
+      "table": "bgp_neighbor",
+      "node": "sonic-vs-1",
+      "change": "modified",
+      "detail": {
+        "Export_Policy": {
+          "old": [
+            "PERMIT-ALL"
+          ],
+          "new": [
+            "RM-EXPORT"
+          ]
+        }
+      }
+    },
+    {
+      "id": "named_structure:sonic-vs-1:sonic-vs-1:Route_Filter_List:PL-EXPORT",
+      "table": "named_structure",
+      "node": "sonic-vs-1",
+      "change": "added",
+      "detail": {
+        "Structure_Definition": [
+          "lines",
+          "name",
+          "vendorStructureId"
+        ]
+      }
+    },
+    {
+      "id": "named_structure:sonic-vs-1:sonic-vs-1:Routing_Policy:RM-EXPORT",
+      "table": "named_structure",
+      "node": "sonic-vs-1",
+      "change": "added",
+      "detail": {
+        "Structure_Definition": [
+          "name",
+          "statements"
+        ]
+      }
+    },
+    {
+      "id": "named_structure:sonic-vs-1:sonic-vs-1:VRF:default",
+      "table": "named_structure",
+      "node": "sonic-vs-1",
+      "change": "modified",
+      "detail": {
+        "Structure_Definition": {
+          "old": {
+            "name": "default",
+            "bgpProcess": {
+              "clientToClientReflection": true,
+              "ebgpAdminCost": 20,
+              "ibgpAdminCost": 200,
+              "localAdminCost": 200,
+              "localOriginationTypeTieBreaker": "NO_PREFERENCE",
+              "networkNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributeNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributionPolicy": "~BGP_REDISTRIBUTION_POLICY:default~",
+              "routerId": "10.1.0.1",
+              "clusterListAsIbgpCost": true,
+              "multipathEbgp": false,
+              "multipathEquivalentAsPathMatchMode": "EXACT_PATH",
+              "multipathIbgp": false,
+              "neighbors": {
+                "10.1.1.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.1.1.1~",
+                    "exportPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "importPolicy": "PERMIT-ALL",
+                    "importPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65001,
+                  "localIp": "10.1.1.0",
+                  "peerAddress": "10.1.1.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                },
+                "10.1.2.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.1.2.1~",
+                    "exportPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "importPolicy": "PERMIT-ALL",
+                    "importPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65001,
+                  "localIp": "10.1.2.0",
+                  "peerAddress": "10.1.2.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                }
+              },
+              "tieBreaker": "ARRIVAL_ORDER"
+            },
+            "resolutionPolicy": "~RESOLUTION_POLICY~"
+          },
+          "new": {
+            "name": "default",
+            "bgpProcess": {
+              "clientToClientReflection": true,
+              "ebgpAdminCost": 20,
+              "ibgpAdminCost": 200,
+              "localAdminCost": 200,
+              "localOriginationTypeTieBreaker": "NO_PREFERENCE",
+              "networkNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributeNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributionPolicy": "~BGP_REDISTRIBUTION_POLICY:default~",
+              "routerId": "10.1.0.1",
+              "clusterListAsIbgpCost": true,
+              "multipathEbgp": false,
+              "multipathEquivalentAsPathMatchMode": "EXACT_PATH",
+              "multipathIbgp": false,
+              "neighbors": {
+                "10.1.1.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.1.1.1~",
+                    "exportPolicySources": [
+                      "RM-EXPORT"
+                    ],
+                    "importPolicy": "PERMIT-ALL",
+                    "importPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65001,
+                  "localIp": "10.1.1.0",
+                  "peerAddress": "10.1.1.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                },
+                "10.1.2.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.1.2.1~",
+                    "exportPolicySources": [
+                      "RM-EXPORT"
+                    ],
+                    "importPolicy": "PERMIT-ALL",
+                    "importPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65001,
+                  "localIp": "10.1.2.0",
+                  "peerAddress": "10.1.2.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                }
+              },
+              "tieBreaker": "ARRIVAL_ORDER"
+            },
+            "resolutionPolicy": "~RESOLUTION_POLICY~"
+          }
+        }
+      }
+    }
+  ]
+}

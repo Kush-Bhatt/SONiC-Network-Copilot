@@ -1,0 +1,281 @@
+---
+########################################
+# Leaf-Spine Topology Automation — validate-first style
+########################################
+
+- name: Validate spine variables before touching anything
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Assert spine config has required fields
+      assert:
+        that:
+          - my_config.links | length == 2
+          - my_config.routes | length == 2
+        fail_msg: "{{ inventory_hostname }} spine config incomplete — aborting"
+        success_msg: "{{ inventory_hostname }} spine config validated OK"
+
+    - name: Assert each link has iface and ip
+      assert:
+        that:
+          - item.iface is defined
+          - item.ip is defined
+        fail_msg: "Spine link entry missing fields on {{ inventory_hostname }}"
+      loop: "{{ my_config.links }}"
+
+    - name: Assert each route has prefix and nexthop
+      assert:
+        that:
+          - item.prefix is defined
+          - item.nexthop is defined
+        fail_msg: "Spine route entry missing fields on {{ inventory_hostname }}"
+      loop: "{{ my_config.routes }}"
+
+    - name: Build spine config summary
+      set_fact:
+        spine_summary:
+          host: "{{ inventory_hostname }}"
+          link_count: "{{ my_config.links | length }}"
+          route_count: "{{ my_config.routes | length }}"
+
+    - name: Print spine config summary before pushing
+      debug:
+        var: spine_summary
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Remove existing IPs on spine inter-switch links
+      shell: |
+        existing=$(show ip interfaces | grep "{{ item.iface }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+        fi
+      loop: "{{ my_config.links }}"
+      ignore_errors: true
+
+    - name: Assign IP on spine inter-switch links
+      shell: config interface ip add {{ item.iface }} {{ item.ip }}
+      loop: "{{ my_config.links }}"
+
+    - name: Remove existing static routes on spine
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        fi
+      loop: "{{ my_config.routes }}"
+      ignore_errors: true
+
+    - name: Add static routes on spine
+      shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+      loop: "{{ my_config.routes }}"
+
+    - name: Save SONiC config on spine
+      shell: config save -y
+
+
+- name: Validate leaf variables before touching anything
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    - name: Assert leaf config has required fields
+      assert:
+        that:
+          - my_config.vlan_id is defined
+          - my_config.vlan_ip is defined
+          - my_config.access_port is defined
+          - my_config.links | length == 2
+          - my_config.routes | length == 2
+        fail_msg: "{{ inventory_hostname }} leaf config incomplete — aborting"
+        success_msg: "{{ inventory_hostname }} leaf config validated OK"
+
+    - name: Build leaf config summary
+      set_fact:
+        leaf_summary:
+          host: "{{ inventory_hostname }}"
+          vlan: "{{ my_config.vlan_id }} — {{ my_config.vlan_ip }}"
+          access_port: "{{ my_config.access_port }}"
+          link_count: "{{ my_config.links | length }}"
+
+    - name: Print leaf config summary before pushing
+      debug:
+        var: leaf_summary
+
+- name: Configure Leaf Switches (VS-1, VS-2)
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    - name: Remove access port from any VLAN it belongs to
+      shell: |
+        for vid in $(show vlan brief | grep "{{ my_config.access_port }}" | awk '{print $1}'); do
+          config vlan member del $vid {{ my_config.access_port }}
+        done
+      ignore_errors: true
+
+    - name: Remove any IP on access port
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ my_config.access_port }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ my_config.access_port }} $existing
+        fi
+      ignore_errors: true
+
+    - name: Remove existing IPs on leaf inter-switch links
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+        fi
+      loop: "{{ my_config.links }}"
+      ignore_errors: true
+
+    - name: Remove existing VLAN SVI IP if present
+      shell: |
+        existing=$(show ip interfaces | grep "^Vlan{{ my_config.vlan_id }}" | awk '{print $2}')
+        if [ -n "$existing" ]; then
+          config interface ip remove Vlan{{ my_config.vlan_id }} $existing
+        fi
+      ignore_errors: true
+
+    - name: Remove existing VLAN if present
+      shell: |
+        existing=$(show vlan brief | grep "^\s*{{ my_config.vlan_id }}")
+        if [ -n "$existing" ]; then
+          config vlan del {{ my_config.vlan_id }}
+        fi
+      ignore_errors: true
+
+    - name: Create VLAN
+      shell: config vlan add {{ my_config.vlan_id }}
+
+    - name: Add access port to VLAN (untagged)
+      shell: config vlan member add -u {{ my_config.vlan_id }} {{ my_config.access_port }}
+
+    - name: Assign SVI IP
+      shell: config interface ip add Vlan{{ my_config.vlan_id }} {{ my_config.vlan_ip }}
+
+    - name: Assign IP on leaf inter-switch uplinks
+      shell: config interface ip add {{ item.iface }} {{ item.ip }}
+      loop: "{{ my_config.links }}"
+
+    - name: Remove existing static routes on leaf
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        fi
+      loop: "{{ my_config.routes }}"
+      ignore_errors: true
+
+    - name: Add static routes on leaf
+      shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+      loop: "{{ my_config.routes }}"
+
+    - name: Save SONiC config on leaf
+      shell: config save -y
+
+    - name: Verify VLAN member is present
+      shell: show vlan brief
+      register: vlan_output
+
+    - name: Show VLAN brief output
+      debug:
+        var: vlan_output.stdout

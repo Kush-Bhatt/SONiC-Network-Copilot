@@ -1,0 +1,362 @@
+---
+########################################
+# Leaf-Spine BGP Automation — register/when chaining style
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        bgp_asn: 65000
+        router_id: 10.0.0.3
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        neighbors:
+          - { ip: 10.0.13.1, remote_asn: 65001, desc: VS-1-Leaf1 }
+          - { ip: 10.0.23.1, remote_asn: 65002, desc: VS-2-Leaf2 }
+      vs-4:
+        bgp_asn: 65000
+        router_id: 10.0.0.4
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        neighbors:
+          - { ip: 10.0.14.1, remote_asn: 65001, desc: VS-1-Leaf1 }
+          - { ip: 10.0.24.1, remote_asn: 65002, desc: VS-2-Leaf2 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Check current IP on each spine link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}'
+      loop: "{{ my_config.links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove existing IP if different from desired
+      shell: config interface ip remove {{ item.item.iface }} {{ item.stdout }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when:
+        - item.stdout is defined
+        - item.stdout | length > 0
+        - item.stdout != (item.item.ip)
+      changed_when: true
+
+    - name: Assign desired IP if missing
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check if BGP instance already exists on spine
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ my_config.bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ my_config.bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on spine
+      shell: |
+        vtysh << 'EOF'
+        configure terminal
+        router bgp {{ my_config.bgp_asn }}
+        bgp router-id {{ my_config.router_id }}
+        bgp log-neighbor-changes
+        no bgp ebgp-requires-policy
+        neighbor {{ my_config.neighbors[0].ip }} remote-as {{ my_config.neighbors[0].remote_asn }}
+        neighbor {{ my_config.neighbors[0].ip }} description {{ my_config.neighbors[0].desc }}
+        neighbor {{ my_config.neighbors[0].ip }} timers 3 9
+        neighbor {{ my_config.neighbors[1].ip }} remote-as {{ my_config.neighbors[1].remote_asn }}
+        neighbor {{ my_config.neighbors[1].ip }} description {{ my_config.neighbors[1].desc }}
+        neighbor {{ my_config.neighbors[1].ip }} timers 3 9
+        address-family ipv4 unicast
+        neighbor {{ my_config.neighbors[0].ip }} activate
+        neighbor {{ my_config.neighbors[0].ip }} soft-reconfiguration inbound
+        neighbor {{ my_config.neighbors[1].ip }} activate
+        neighbor {{ my_config.neighbors[1].ip }} soft-reconfiguration inbound
+        exit-address-family
+        end
+        write memory
+        EOF
+      changed_when: true
+
+    - name: Save SONiC config on spine
+      shell: config save -y
+      changed_when: true
+
+    - name: Show ip interfaces on spine
+      shell: show ip interfaces
+      register: iface_out
+      changed_when: false
+
+    - name: Print ip interfaces on spine
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on spine
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on spine
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-1 Leaf (with loopback advertisement)
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 10.1.0.1
+    loopback_ip: 10.1.0.1/32
+    advertise_prefix: 10.1.0.1/32
+    links:
+      - { iface: Ethernet12, ip: 10.0.13.1/30 }
+      - { iface: Ethernet16, ip: 10.0.14.1/30 }
+    neighbors:
+      - { ip: 10.0.13.2, remote_asn: 65000, desc: VS-3-Spine1 }
+      - { ip: 10.0.14.2, remote_asn: 65000, desc: VS-4-Spine2 }
+
+  tasks:
+    - name: Check current IP on each VS-1 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}'
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove existing IP if different from desired
+      shell: config interface ip remove {{ item.item.iface }} {{ item.stdout }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when:
+        - item.stdout is defined
+        - item.stdout | length > 0
+        - item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Assign desired IP if missing
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check current Loopback0 IP
+      shell: show ip interfaces | grep "Loopback0" | awk '{print $2}'
+      register: lo_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove Loopback0 IP if different from desired
+      shell: config interface ip remove Loopback0 {{ lo_check.stdout }}
+      when:
+        - lo_check.stdout is defined
+        - lo_check.stdout | length > 0
+        - lo_check.stdout != loopback_ip
+      changed_when: true
+
+    - name: Assign Loopback0 IP if missing
+      shell: config interface ip add Loopback0 {{ loopback_ip }}
+      when: lo_check.stdout != loopback_ip
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-1
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-1
+      shell: |
+        vtysh << 'EOF'
+        configure terminal
+        router bgp {{ bgp_asn }}
+        bgp router-id {{ router_id }}
+        bgp log-neighbor-changes
+        no bgp ebgp-requires-policy
+        neighbor {{ neighbors[0].ip }} remote-as {{ neighbors[0].remote_asn }}
+        neighbor {{ neighbors[0].ip }} description {{ neighbors[0].desc }}
+        neighbor {{ neighbors[0].ip }} timers 3 9
+        neighbor {{ neighbors[1].ip }} remote-as {{ neighbors[1].remote_asn }}
+        neighbor {{ neighbors[1].ip }} description {{ neighbors[1].desc }}
+        neighbor {{ neighbors[1].ip }} timers 3 9
+        address-family ipv4 unicast
+        network {{ advertise_prefix }}
+        neighbor {{ neighbors[0].ip }} activate
+        neighbor {{ neighbors[0].ip }} soft-reconfiguration inbound
+        neighbor {{ neighbors[1].ip }} activate
+        neighbor {{ neighbors[1].ip }} soft-reconfiguration inbound
+        exit-address-family
+        end
+        write memory
+        EOF
+      changed_when: true
+
+    - name: Save SONiC config on VS-1
+      shell: config save -y
+      changed_when: true
+
+    - name: Show ip interfaces on VS-1
+      shell: show ip interfaces
+      register: iface_out
+      changed_when: false
+
+    - name: Print ip interfaces on VS-1
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout
+
+    - name: Show ip route on VS-1
+      shell: ip route
+      register: route_out
+      changed_when: false
+
+    - name: Print ip route on VS-1
+      debug:
+        var: route_out.stdout
+
+
+- name: Configure VS-2 Leaf (no loopback)
+  hosts: vs-2
+  gather_facts: false
+  vars:
+    bgp_asn: 65002
+    router_id: 10.0.23.1
+    links:
+      - { iface: Ethernet12, ip: 10.0.24.1/30 }
+      - { iface: Ethernet16, ip: 10.0.23.1/30 }
+    neighbors:
+      - { ip: 10.0.24.2, remote_asn: 65000, desc: VS-4-Spine2 }
+      - { ip: 10.0.23.2, remote_asn: 65000, desc: VS-3-Spine1 }
+
+  tasks:
+    - name: Check current IP on each VS-2 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}'
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove existing IP if different from desired
+      shell: config interface ip remove {{ item.item.iface }} {{ item.stdout }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when:
+        - item.stdout is defined
+        - item.stdout | length > 0
+        - item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Assign desired IP if missing
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check current Loopback0 IP on VS-2
+      shell: show ip interfaces | grep "Loopback0" | awk '{print $2}'
+      register: lo_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove any stray Loopback0 IP on VS-2
+      shell: config interface ip remove Loopback0 {{ lo_check.stdout }}
+      when:
+        - lo_check.stdout is defined
+        - lo_check.stdout | length > 0
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-2
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-2
+      shell: |
+        vtysh << 'EOF'
+        configure terminal
+        router bgp {{ bgp_asn }}
+        bgp router-id {{ router_id }}
+        bgp log-neighbor-changes
+        no bgp ebgp-requires-policy
+        neighbor {{ neighbors[0].ip }} remote-as {{ neighbors[0].remote_asn }}
+        neighbor {{ neighbors[0].ip }} description {{ neighbors[0].desc }}
+        neighbor {{ neighbors[0].ip }} timers 3 9
+        neighbor {{ neighbors[1].ip }} remote-as {{ neighbors[1].remote_asn }}
+        neighbor {{ neighbors[1].ip }} description {{ neighbors[1].desc }}
+        neighbor {{ neighbors[1].ip }} timers 3 9
+        address-family ipv4 unicast
+        neighbor {{ neighbors[0].ip }} activate
+        neighbor {{ neighbors[0].ip }} soft-reconfiguration inbound
+        neighbor {{ neighbors[1].ip }} activate
+        neighbor {{ neighbors[1].ip }} soft-reconfiguration inbound
+        exit-address-family
+        end
+        write memory
+        EOF
+      changed_when: true
+
+    - name: Save SONiC config on VS-2
+      shell: config save -y
+      changed_when: true
+
+    - name: Show ip interfaces on VS-2
+      shell: show ip interfaces
+      register: iface_out
+      changed_when: false
+
+    - name: Print ip interfaces on VS-2
+      debug:
+        var: iface_out.stdout
+
+    - name: Show BGP summary on VS-2
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-2
+      debug:
+        var: bgp_out.stdout

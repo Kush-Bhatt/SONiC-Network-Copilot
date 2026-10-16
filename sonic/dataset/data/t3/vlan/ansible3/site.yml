@@ -1,0 +1,93 @@
+---
+- name: Configure VLAN10 on SONiC-VS-1 for Alpine PCs — register/when chaining style
+  hosts: vs-1
+  gather_facts: no
+  become: yes
+  vars:
+    vlan_id: 10
+    vlan_gateway_ip: "192.168.10.1/24"
+    vlan_ports:
+      - Ethernet8
+      - Ethernet12
+      - Ethernet16
+      - Ethernet20
+      - Ethernet24
+
+  tasks:
+    - name: Check if VLAN10 already exists
+      shell: "show vlan brief | grep -w {{ vlan_id }} || true"
+      register: vlan_check
+      changed_when: false
+
+    - name: Create VLAN10 if missing
+      command: "config vlan add {{ vlan_id }}"
+      when: vlan_check.stdout | length == 0
+      changed_when: true
+
+    - name: Check VLAN10 member status for each port
+      shell: "show vlan brief | grep -w {{ item }} || true"
+      loop: "{{ vlan_ports }}"
+      loop_control:
+        label: "{{ item }}"
+      register: port_check
+      changed_when: false
+
+    - name: Add port as untagged member if missing
+      command: "config vlan member add -u {{ vlan_id }} {{ item.item }}"
+      loop: "{{ port_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout | length == 0
+      changed_when: true
+
+    - name: Check if Vlan10 SVI already has the desired IP
+      shell: "show ip interfaces | grep -w {{ vlan_gateway_ip }} || true"
+      register: svi_check
+      changed_when: false
+
+    - name: Check current Vlan10 SVI IP if different
+      shell: "show ip interfaces | grep '^Vlan{{ vlan_id }}' | awk '{print $2}' || true"
+      register: current_svi_ip
+      changed_when: false
+      when: svi_check.stdout | length == 0
+
+    - name: Remove stale Vlan10 SVI IP if present and different
+      command: "config interface ip remove Vlan{{ vlan_id }} {{ current_svi_ip.stdout }}"
+      when:
+        - svi_check.stdout | length == 0
+        - current_svi_ip.stdout is defined
+        - current_svi_ip.stdout | length > 0
+        - current_svi_ip.stdout != vlan_gateway_ip
+      changed_when: true
+
+    - name: Assign SVI gateway IP if missing
+      command: "config interface ip add Vlan{{ vlan_id }} {{ vlan_gateway_ip }}"
+      when: svi_check.stdout | length == 0
+      changed_when: true
+
+    - name: Save SONiC running config
+      command: "config save -y"
+      changed_when: true
+
+    - name: Save FRR config via vtysh
+      command: 'vtysh -c "write memory"'
+      changed_when: true
+
+    - name: Check if netfilter-persistent is installed
+      shell: command -v netfilter-persistent || true
+      register: nfp_check
+      changed_when: false
+
+    - name: Persist iptables/netfilter rules if available
+      command: "netfilter-persistent save"
+      when: nfp_check.stdout | length > 0
+      changed_when: true
+
+    - name: Verify VLAN10 configuration
+      command: "show vlan brief"
+      register: vlan_brief
+      changed_when: false
+
+    - name: Display VLAN10 verification output
+      debug:
+        var: vlan_brief.stdout_lines

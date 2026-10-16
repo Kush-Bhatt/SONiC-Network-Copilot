@@ -1,0 +1,212 @@
+---
+########################################
+# Ring Topology BGP Automation — vtysh stdin-piped style
+########################################
+
+- name: Configure VS-1
+  hosts: vs-1
+  gather_facts: false
+  tasks:
+    - name: Assign IP on Ethernet4 (→ VS-2)
+      shell: config interface ip add Ethernet4 10.0.12.1/30
+
+    - name: Assign IP on Ethernet8 (→ VS-3)
+      shell: config interface ip add Ethernet8 10.0.13.1/30
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Build and load BGP config on VS-1 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp 65001'
+          echo ' bgp router-id 10.0.12.1'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor 10.0.12.2 remote-as 65002'
+          echo ' neighbor 10.0.12.2 description VS-2'
+          echo ' neighbor 10.0.12.2 timers 3 9'
+          echo ' neighbor 10.0.13.2 remote-as 65003'
+          echo ' neighbor 10.0.13.2 description VS-3'
+          echo ' neighbor 10.0.13.2 timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  neighbor 10.0.12.2 activate'
+          echo '  neighbor 10.0.12.2 soft-reconfiguration inbound'
+          echo '  neighbor 10.0.13.2 activate'
+          echo '  neighbor 10.0.13.2 soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-2
+  hosts: vs-2
+  gather_facts: false
+  tasks:
+    - name: Assign IP on Ethernet8 (→ VS-1)
+      shell: config interface ip add Ethernet8 10.0.12.2/30
+
+    - name: Assign IP on Ethernet4 (→ VS-4)
+      shell: config interface ip add Ethernet4 10.0.24.1/30
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Build and load BGP config on VS-2 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp 65002'
+          echo ' bgp router-id 10.0.12.2'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor 10.0.12.1 remote-as 65001'
+          echo ' neighbor 10.0.12.1 description VS-1'
+          echo ' neighbor 10.0.12.1 timers 3 9'
+          echo ' neighbor 10.0.24.2 remote-as 65004'
+          echo ' neighbor 10.0.24.2 description VS-4'
+          echo ' neighbor 10.0.24.2 timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  neighbor 10.0.12.1 activate'
+          echo '  neighbor 10.0.12.1 soft-reconfiguration inbound'
+          echo '  neighbor 10.0.24.2 activate'
+          echo '  neighbor 10.0.24.2 soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Show BGP summary on VS-2
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-2
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-3
+  hosts: vs-3
+  gather_facts: false
+  tasks:
+    - name: Assign IP on Ethernet8 (→ VS-1)
+      shell: config interface ip add Ethernet8 10.0.13.2/30
+
+    - name: Assign IP on Ethernet4 (→ VS-4)
+      shell: config interface ip add Ethernet4 10.0.34.1/30
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Build and load BGP config on VS-3 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp 65003'
+          echo ' bgp router-id 10.0.13.2'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor 10.0.13.1 remote-as 65001'
+          echo ' neighbor 10.0.13.1 description VS-1'
+          echo ' neighbor 10.0.13.1 timers 3 9'
+          echo ' neighbor 10.0.34.2 remote-as 65004'
+          echo ' neighbor 10.0.34.2 description VS-4'
+          echo ' neighbor 10.0.34.2 timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  neighbor 10.0.13.1 activate'
+          echo '  neighbor 10.0.13.1 soft-reconfiguration inbound'
+          echo '  neighbor 10.0.34.2 activate'
+          echo '  neighbor 10.0.34.2 soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Show BGP summary on VS-3
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-3
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-4 (with Loopback advertisement)
+  hosts: vs-4
+  gather_facts: false
+  tasks:
+    - name: Assign IP on Ethernet20 (→ VS-2)
+      shell: config interface ip add Ethernet20 10.0.24.2/30
+
+    - name: Assign IP on Ethernet16 (→ VS-3)
+      shell: config interface ip add Ethernet16 10.0.34.2/30
+
+    - name: Add Loopback0 IP
+      shell: config interface ip add Loopback0 10.4.4.4/32
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Build and load BGP config on VS-4 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp 65004'
+          echo ' bgp router-id 10.0.24.2'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor 10.0.24.1 remote-as 65002'
+          echo ' neighbor 10.0.24.1 description VS-2'
+          echo ' neighbor 10.0.24.1 timers 3 9'
+          echo ' neighbor 10.0.34.1 remote-as 65003'
+          echo ' neighbor 10.0.34.1 description VS-3'
+          echo ' neighbor 10.0.34.1 timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  network 10.4.4.4/32'
+          echo '  neighbor 10.0.24.1 activate'
+          echo '  neighbor 10.0.24.1 soft-reconfiguration inbound'
+          echo '  neighbor 10.0.34.1 activate'
+          echo '  neighbor 10.0.34.1 soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Show BGP summary on VS-4
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-4
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Final verification across all switches
+  hosts: vs-1:vs-2:vs-3
+  gather_facts: false
+  tasks:
+    - name: Wait for BGP convergence
+      pause:
+        seconds: 10
+
+    - name: Check if loopback route is learned
+      shell: ip route show 10.4.4.4/32
+      register: route_check
+
+    - name: Print loopback route status
+      debug:
+        var: route_check.stdout

@@ -1,0 +1,110 @@
+---
+- name: Validate VLAN10 variables before touching anything
+  hosts: vs-4
+  gather_facts: no
+  become: yes
+  vars:
+    vlan_id: 10
+    vlan_name: "Vlan10"
+    vlan_ip: "10.0.2.1/24"
+    access_ports:
+      - Ethernet4
+      - Ethernet8
+
+  tasks:
+    - name: Assert required variables are defined
+      assert:
+        that:
+          - vlan_id is defined
+          - vlan_name is defined
+          - vlan_ip is defined
+          - access_ports | length == 2
+        fail_msg: "VLAN10 config incomplete on {{ inventory_hostname }} — aborting"
+        success_msg: "VLAN10 config validated OK on {{ inventory_hostname }}"
+
+    - name: Build config summary
+      set_fact:
+        vlan_summary:
+          host: "{{ inventory_hostname }}"
+          vlan: "{{ vlan_id }} ({{ vlan_name }})"
+          ip: "{{ vlan_ip }}"
+          ports: "{{ access_ports | join(', ') }}"
+
+    - name: Print config summary before pushing
+      debug:
+        var: vlan_summary
+
+
+- name: Configure VLAN10 on SONiC-VS-4 (access switch for Alpine nodes) — validate-first style
+  hosts: vs-4
+  gather_facts: no
+  become: yes
+  vars:
+    vlan_id: 10
+    vlan_name: "Vlan10"
+    vlan_ip: "10.0.2.1/24"
+    access_ports:
+      - Ethernet4
+      - Ethernet8
+
+  tasks:
+    - name: Check if VLAN10 already exists
+      ansible.builtin.shell: "show vlan brief | grep -w {{ vlan_id }}"
+      register: vlan_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create VLAN10
+      ansible.builtin.shell: "config vlan add {{ vlan_id }}"
+      when: vlan_check.stdout == ""
+
+    - name: Check if Ethernet4 is already a VLAN10 member
+      ansible.builtin.shell: "show vlan brief | grep -w {{ access_ports[0] }}"
+      register: eth4_check
+      changed_when: false
+      failed_when: false
+
+    - name: Add Ethernet4 as untagged member of VLAN10
+      ansible.builtin.shell: "config vlan member add {{ vlan_id }} {{ access_ports[0] }} -u"
+      when: eth4_check.stdout == ""
+
+    - name: Check if Ethernet8 is already a VLAN10 member
+      ansible.builtin.shell: "show vlan brief | grep -w {{ access_ports[1] }}"
+      register: eth8_check
+      changed_when: false
+      failed_when: false
+
+    - name: Add Ethernet8 as untagged member of VLAN10
+      ansible.builtin.shell: "config vlan member add {{ vlan_id }} {{ access_ports[1] }} -u"
+      when: eth8_check.stdout == ""
+
+    - name: Check if Vlan10 already has the IP assigned
+      ansible.builtin.shell: "show ip interfaces | grep -w {{ vlan_ip }}"
+      register: vlan_ip_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assign IP to Vlan10 SVI
+      ansible.builtin.shell: "config interface ip add {{ vlan_name }} {{ vlan_ip }}"
+      when: vlan_ip_check.stdout == ""
+
+    - name: Save running configuration
+      ansible.builtin.shell: "config save -y"
+
+    - name: Verify VLAN10 brief
+      ansible.builtin.shell: "show vlan brief"
+      register: vlan_brief
+      changed_when: false
+
+    - name: Display VLAN10 brief output
+      debug:
+        msg: "{{ vlan_brief.stdout }}"
+
+    - name: Verify IP interfaces
+      ansible.builtin.shell: "show ip interfaces"
+      register: ip_intf
+      changed_when: false
+
+    - name: Display IP interfaces output
+      debug:
+        msg: "{{ ip_intf.stdout }}"

@@ -1,0 +1,50 @@
+---
+- name: Configure VLAN10 on SONiC-VS-4 (access switch for Alpine nodes) — batch-script style
+  hosts: vs-4
+  gather_facts: no
+  become: yes
+  vars:
+    vlan_id: 10
+    vlan_name: "Vlan10"
+    vlan_ip: "10.0.2.1/24"
+    access_ports:
+      - Ethernet4
+      - Ethernet8
+
+  tasks:
+    # Single combined script: checks and configures VLAN, members,
+    # and SVI IP all in one shell invocation instead of six separate
+    # check-then-act task pairs.
+    - name: Run combined VLAN10 setup script
+      ansible.builtin.shell: |
+        vlan_exists=$(show vlan brief | grep -w {{ vlan_id }})
+        [ -z "$vlan_exists" ] && config vlan add {{ vlan_id }}
+
+        {% for p in access_ports %}
+        port_member_{{ loop.index }}=$(show vlan brief | grep -w {{ p }})
+        [ -z "$port_member_{{ loop.index }}" ] && config vlan member add {{ vlan_id }} {{ p }} -u
+        {% endfor %}
+
+        ip_exists=$(show ip interfaces | grep -w {{ vlan_ip }})
+        [ -z "$ip_exists" ] && config interface ip add {{ vlan_name }} {{ vlan_ip }}
+
+        config save -y
+      changed_when: true
+
+    - name: Verify VLAN10 brief
+      ansible.builtin.shell: "show vlan brief"
+      register: vlan_brief
+      changed_when: false
+
+    - name: Display VLAN10 brief output
+      debug:
+        msg: "{{ vlan_brief.stdout }}"
+
+    - name: Verify IP interfaces
+      ansible.builtin.shell: "show ip interfaces"
+      register: ip_intf
+      changed_when: false
+
+    - name: Display IP interfaces output
+      debug:
+        msg: "{{ ip_intf.stdout }}"

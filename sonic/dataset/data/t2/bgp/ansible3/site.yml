@@ -1,0 +1,334 @@
+---
+########################################
+# Ring Topology BGP Automation — register/when chaining style
+########################################
+
+- name: Configure VS-1
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    links:
+      - { iface: Ethernet4, ip: 10.0.12.1/30 }
+      - { iface: Ethernet8, ip: 10.0.13.1/30 }
+    bgp_asn: 65001
+  tasks:
+    - name: Check current IP on each VS-1 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}' || true
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Assign IP if missing on VS-1 link
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-1
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-1
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp 65001" \
+              -c "bgp router-id 10.0.12.1" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor 10.0.12.2 remote-as 65002" \
+              -c "neighbor 10.0.12.2 description VS-2" \
+              -c "neighbor 10.0.12.2 timers 3 9" \
+              -c "neighbor 10.0.13.2 remote-as 65003" \
+              -c "neighbor 10.0.13.2 description VS-3" \
+              -c "neighbor 10.0.13.2 timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "neighbor 10.0.12.2 activate" \
+              -c "neighbor 10.0.12.2 soft-reconfiguration inbound" \
+              -c "neighbor 10.0.13.2 activate" \
+              -c "neighbor 10.0.13.2 soft-reconfiguration inbound" \
+              -c "end"
+      changed_when: true
+
+    - name: Save FRR config on VS-1
+      shell: vtysh -c "write memory"
+      changed_when: true
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-2
+  hosts: vs-2
+  gather_facts: false
+  vars:
+    links:
+      - { iface: Ethernet8, ip: 10.0.12.2/30 }
+      - { iface: Ethernet4, ip: 10.0.24.1/30 }
+    bgp_asn: 65002
+  tasks:
+    - name: Check current IP on each VS-2 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}' || true
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Assign IP if missing on VS-2 link
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-2
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-2
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp 65002" \
+              -c "bgp router-id 10.0.12.2" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor 10.0.12.1 remote-as 65001" \
+              -c "neighbor 10.0.12.1 description VS-1" \
+              -c "neighbor 10.0.12.1 timers 3 9" \
+              -c "neighbor 10.0.24.2 remote-as 65004" \
+              -c "neighbor 10.0.24.2 description VS-4" \
+              -c "neighbor 10.0.24.2 timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "neighbor 10.0.12.1 activate" \
+              -c "neighbor 10.0.12.1 soft-reconfiguration inbound" \
+              -c "neighbor 10.0.24.2 activate" \
+              -c "neighbor 10.0.24.2 soft-reconfiguration inbound" \
+              -c "end"
+      changed_when: true
+
+    - name: Save FRR config on VS-2
+      shell: vtysh -c "write memory"
+      changed_when: true
+
+    - name: Show BGP summary on VS-2
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-2
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-3
+  hosts: vs-3
+  gather_facts: false
+  vars:
+    links:
+      - { iface: Ethernet8, ip: 10.0.13.2/30 }
+      - { iface: Ethernet4, ip: 10.0.34.1/30 }
+    bgp_asn: 65003
+  tasks:
+    - name: Check current IP on each VS-3 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}' || true
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Assign IP if missing on VS-3 link
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-3
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-3
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp 65003" \
+              -c "bgp router-id 10.0.13.2" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor 10.0.13.1 remote-as 65001" \
+              -c "neighbor 10.0.13.1 description VS-1" \
+              -c "neighbor 10.0.13.1 timers 3 9" \
+              -c "neighbor 10.0.34.2 remote-as 65004" \
+              -c "neighbor 10.0.34.2 description VS-4" \
+              -c "neighbor 10.0.34.2 timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "neighbor 10.0.13.1 activate" \
+              -c "neighbor 10.0.13.1 soft-reconfiguration inbound" \
+              -c "neighbor 10.0.34.2 activate" \
+              -c "neighbor 10.0.34.2 soft-reconfiguration inbound" \
+              -c "end"
+      changed_when: true
+
+    - name: Save FRR config on VS-3
+      shell: vtysh -c "write memory"
+      changed_when: true
+
+    - name: Show BGP summary on VS-3
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-3
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Configure VS-4 (with Loopback advertisement)
+  hosts: vs-4
+  gather_facts: false
+  vars:
+    links:
+      - { iface: Ethernet20, ip: 10.0.24.2/30 }
+      - { iface: Ethernet16, ip: 10.0.34.2/30 }
+    bgp_asn: 65004
+    loopback_ip: 10.4.4.4/32
+  tasks:
+    - name: Check current IP on each VS-4 link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}' || true
+      loop: "{{ links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Assign IP if missing on VS-4 link
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check current Loopback0 IP
+      shell: show ip interfaces | grep "^Loopback0" | awk '{print $2}' || true
+      register: lo_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Assign Loopback0 IP if missing
+      shell: config interface ip add Loopback0 {{ loopback_ip }}
+      when: lo_check.stdout != loopback_ip
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Check if BGP instance already exists on VS-4
+      shell: vtysh -c "show running-config" | grep -c "^router bgp {{ bgp_asn }}" || true
+      register: bgp_check
+      changed_when: false
+
+    - name: Remove existing BGP instance if present
+      shell: vtysh -c "configure terminal" -c "no router bgp {{ bgp_asn }}" -c "end"
+      when: bgp_check.stdout != "0"
+      changed_when: true
+
+    - name: Configure BGP on VS-4 with loopback advertisement
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp 65004" \
+              -c "bgp router-id 10.0.24.2" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor 10.0.24.1 remote-as 65002" \
+              -c "neighbor 10.0.24.1 description VS-2" \
+              -c "neighbor 10.0.24.1 timers 3 9" \
+              -c "neighbor 10.0.34.1 remote-as 65003" \
+              -c "neighbor 10.0.34.1 description VS-3" \
+              -c "neighbor 10.0.34.1 timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "network 10.4.4.4/32" \
+              -c "neighbor 10.0.24.1 activate" \
+              -c "neighbor 10.0.24.1 soft-reconfiguration inbound" \
+              -c "neighbor 10.0.34.1 activate" \
+              -c "neighbor 10.0.34.1 soft-reconfiguration inbound" \
+              -c "end"
+      changed_when: true
+
+    - name: Save FRR config on VS-4
+      shell: vtysh -c "write memory"
+      changed_when: true
+
+    - name: Show BGP summary on VS-4
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-4
+      debug:
+        var: bgp_out.stdout
+
+
+- name: Final verification across all switches
+  hosts: vs-1:vs-2:vs-3
+  gather_facts: false
+  tasks:
+    - name: Wait for BGP convergence
+      pause:
+        seconds: 10
+
+    - name: Check if loopback route is learned
+      shell: ip route show 10.4.4.4/32
+      register: route_check
+      changed_when: false
+
+    - name: Print loopback route status
+      debug:
+        var: route_check.stdout

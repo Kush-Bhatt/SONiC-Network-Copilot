@@ -1,0 +1,241 @@
+---
+########################################
+# Leaf-Spine Topology Automation — register/when chaining style
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    - name: Check current IP on each spine link
+      shell: show ip interfaces | grep "{{ item.iface }}" | awk '{print $2}'
+      loop: "{{ my_config.links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove existing IP if different from desired
+      shell: config interface ip remove {{ item.item.iface }} {{ item.stdout }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when:
+        - item.stdout is defined
+        - item.stdout | length > 0
+        - item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Assign desired IP if missing
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check which spine routes already exist
+      shell: ip route show {{ item.prefix }} | grep -v "proto kernel" || true
+      loop: "{{ my_config.routes }}"
+      loop_control:
+        label: "{{ item.prefix }}"
+      register: route_check
+      changed_when: false
+
+    - name: Remove existing routes before re-adding
+      shell: config route del prefix {{ item.item.prefix }} nexthop {{ item.item.nexthop }}
+      loop: "{{ route_check.results }}"
+      loop_control:
+        label: "{{ item.item.prefix }}"
+      when: item.stdout | length > 0
+      changed_when: true
+      ignore_errors: true
+
+    - name: Add static routes on spine
+      shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+      loop: "{{ my_config.routes }}"
+      changed_when: true
+
+    - name: Save SONiC config on spine
+      shell: config save -y
+      changed_when: true
+
+
+- name: Configure Leaf Switches (VS-1, VS-2)
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    - name: Check which VLAN the access port currently belongs to
+      shell: show vlan brief | grep "{{ my_config.access_port }}" | awk '{print $1}' || true
+      register: port_vlan_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove access port from its current VLAN if member
+      shell: config vlan member del {{ item }} {{ my_config.access_port }}
+      loop: "{{ port_vlan_check.stdout_lines }}"
+      when: port_vlan_check.stdout_lines | length > 0
+      changed_when: true
+
+    - name: Check current IP on access port
+      shell: show ip interfaces | grep "^{{ my_config.access_port }}" | awk '{print $2}'
+      register: access_ip_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove IP on access port if present
+      shell: config interface ip remove {{ my_config.access_port }} {{ access_ip_check.stdout }}
+      when:
+        - access_ip_check.stdout is defined
+        - access_ip_check.stdout | length > 0
+      changed_when: true
+
+    - name: Check current IP on each leaf link
+      shell: show ip interfaces | grep "^{{ item.iface }}" | awk '{print $2}'
+      loop: "{{ my_config.links }}"
+      loop_control:
+        label: "{{ item.iface }}"
+      register: link_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove existing IP if different from desired
+      shell: config interface ip remove {{ item.item.iface }} {{ item.stdout }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when:
+        - item.stdout is defined
+        - item.stdout | length > 0
+        - item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Assign desired IP if missing on links
+      shell: config interface ip add {{ item.item.iface }} {{ item.item.ip }}
+      loop: "{{ link_check.results }}"
+      loop_control:
+        label: "{{ item.item.iface }}"
+      when: item.stdout != item.item.ip
+      changed_when: true
+
+    - name: Check current VLAN SVI IP
+      shell: show ip interfaces | grep "^Vlan{{ my_config.vlan_id }}" | awk '{print $2}'
+      register: svi_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Remove VLAN SVI IP if different from desired
+      shell: config interface ip remove Vlan{{ my_config.vlan_id }} {{ svi_check.stdout }}
+      when:
+        - svi_check.stdout is defined
+        - svi_check.stdout | length > 0
+        - svi_check.stdout != my_config.vlan_ip
+      changed_when: true
+
+    - name: Check if VLAN already exists
+      shell: show vlan brief | grep -c "^\s*{{ my_config.vlan_id }}" || true
+      register: vlan_exists_check
+      changed_when: false
+
+    - name: Remove existing VLAN if present (force clean recreate)
+      shell: config vlan del {{ my_config.vlan_id }}
+      when: vlan_exists_check.stdout != "0"
+      changed_when: true
+      ignore_errors: true
+
+    - name: Create VLAN
+      shell: config vlan add {{ my_config.vlan_id }}
+      changed_when: true
+
+    - name: Add access port to VLAN (untagged)
+      shell: config vlan member add -u {{ my_config.vlan_id }} {{ my_config.access_port }}
+      changed_when: true
+
+    - name: Assign SVI IP if missing
+      shell: config interface ip add Vlan{{ my_config.vlan_id }} {{ my_config.vlan_ip }}
+      when: svi_check.stdout != my_config.vlan_ip
+      changed_when: true
+
+    - name: Check which leaf routes already exist
+      shell: ip route show {{ item.prefix }} | grep -v "proto kernel" || true
+      loop: "{{ my_config.routes }}"
+      loop_control:
+        label: "{{ item.prefix }}"
+      register: route_check
+      changed_when: false
+
+    - name: Remove existing routes before re-adding
+      shell: config route del prefix {{ item.item.prefix }} nexthop {{ item.item.nexthop }}
+      loop: "{{ route_check.results }}"
+      loop_control:
+        label: "{{ item.item.prefix }}"
+      when: item.stdout | length > 0
+      changed_when: true
+      ignore_errors: true
+
+    - name: Add static routes on leaf
+      shell: config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+      loop: "{{ my_config.routes }}"
+      changed_when: true
+
+    - name: Save SONiC config on leaf
+      shell: config save -y
+      changed_when: true
+
+    - name: Verify VLAN member is present
+      shell: show vlan brief
+      register: vlan_output
+      changed_when: false
+
+    - name: Show VLAN brief output
+      debug:
+        var: vlan_output.stdout

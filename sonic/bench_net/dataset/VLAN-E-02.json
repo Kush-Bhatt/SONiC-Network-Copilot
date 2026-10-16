@@ -1,0 +1,39 @@
+{
+  "id": "VLAN-E-02",
+  "query": "Add the SVI 10.100.1.1/24 to VLAN 100 on L1.",
+  "category": "vlan",
+  "topology": "2-leaves-2-spine",
+  "init_state": "S0 + VLAN-E-01",
+  "reference_playbook": "---\n- name: Agentic-SONiC bench_net dataset item - VLAN-E-02\n  hosts: sonic_switches\n  gather_facts: false\n  become: true\n  become_method: sudo\n\n  tasks:\n    - name: Configure SVI IP 10.100.1.1/24 on VLAN 100 for SONiC-VS-1\n      raw: sudo config interface ip add Vlan100 10.100.1.1/24\n      when: inventory_hostname == \"SONiC-VS-1\"\n      ignore_errors: true\n\n    - name: Verify SVI IP Configuration on SONiC-VS-1\n      raw: show ip interfaces\n      when: inventory_hostname == \"SONiC-VS-1\"\n      register: ip_intf_output\n      failed_when:\n        - ip_intf_output.rc != 0\n        - \"'Vlan100' not in ip_intf_output.stdout\"\n        - \"'10.100.1.1/24' not in ip_intf_output.stdout\"\n      changed_when: false\n\n    - name: Display SVI Interface Output\n      debug:\n        var: ip_intf_output.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-1\"",
+  "expected_diff": [
+    {
+      "id": "interface:sonic-vs-1:sonic-vs-1[Vlan100]",
+      "table": "interface",
+      "node": "sonic-vs-1",
+      "change": "modified",
+      "detail": {
+        "All_Prefixes": {
+          "old": null,
+          "new": [
+            "10.100.1.1/24"
+          ]
+        },
+        "Primary_Address": {
+          "old": null,
+          "new": "10.100.1.1/24"
+        },
+        "Primary_Network": {
+          "old": null,
+          "new": "10.100.1.0/24"
+        }
+      }
+    },
+    {
+      "id": "ip_owner:sonic-vs-1:sonic-vs-1:Vlan100:10.100.1.1",
+      "table": "ip_owner",
+      "node": "sonic-vs-1",
+      "change": "added",
+      "detail": {}
+    }
+  ]
+}

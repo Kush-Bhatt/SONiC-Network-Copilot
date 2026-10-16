@@ -1,0 +1,149 @@
+{
+  "id": "BGP-E-04",
+  "query": "Advertise the VLAN 110 subnet (10.110.2.0/24) from L2.",
+  "category": "bgp",
+  "topology": "2-leaves-2-spine",
+  "init_state": "S0 + VLAN-E-01 ->  BGP-E-03",
+  "reference_playbook": "---\n- name: Agentic-SONiC bench_net dataset item - BGP-E-04\n  hosts: sonic_switches\n  gather_facts: false\n  become: true\n  become_method: sudo\n  tasks:\n\n    # -----------------------------------------------------------------\n    # Safety pre-check: L2 must be AS 65002\n    # -----------------------------------------------------------------\n    - name: Verify SONiC-VS-2 (L2) is running AS 65002\n      raw: sudo vtysh -c \"show ip bgp summary\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_bgp_precheck\n      failed_when: >-\n        l2_bgp_precheck.rc != 0\n        or 'local AS number 65002' not in l2_bgp_precheck.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Safety pre-check: BGP TCP session must be Established.\n    # Do NOT use \"show ip bgp summary\" for this check because\n    # \"(Policy)\" can appear while the TCP session itself is Established.\n    # -----------------------------------------------------------------\n    - name: Verify L2-S2 BGP TCP session is Established\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.2.2.1\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_s2_session_precheck\n      failed_when: >-\n        l2_s2_session_precheck.rc != 0\n        or 'established' not in l2_s2_session_precheck.stdout | lower\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Safety pre-check: VLAN110 subnet must already exist on L2.\n    # -----------------------------------------------------------------\n    - name: Verify L2 has 10.110.2.0/24 before advertising\n      raw: ip route show 10.110.2.0/24\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_vlan110_route_precheck\n      failed_when: >-\n        l2_vlan110_route_precheck.rc != 0\n        or '10.110.2.0/24' not in l2_vlan110_route_precheck.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # REAL CHANGE:\n    # Add outbound policy and advertise VLAN110 from L2.\n    # -----------------------------------------------------------------\n    - name: Configure L2 to advertise 10.110.2.0/24 to S2\n      raw: >-\n        sudo vtysh -c \"configure terminal\"\n        -c \"route-map PERMIT-ALL permit 10\"\n        -c \"exit\"\n        -c \"router bgp 65002\"\n        -c \"address-family ipv4 unicast\"\n        -c \"neighbor 10.2.2.1 route-map PERMIT-ALL out\"\n        -c \"network 10.110.2.0/24\"\n        -c \"exit-address-family\"\n        -c \"exit\"\n        -c \"exit\"\n        -c \"write memory\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      ignore_errors: true\n\n    # -----------------------------------------------------------------\n    # VERIFY immediately after the real change.\n    # -----------------------------------------------------------------\n    - name: Verify L2 running-config contains VLAN110 advertisement\n      raw: sudo vtysh -c \"show running-config\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_runcfg_verify\n      failed_when: >-\n        l2_runcfg_verify.rc != 0\n        or 'network 10.110.2.0/24' not in l2_runcfg_verify.stdout\n        or 'neighbor 10.2.2.1 route-map PERMIT-ALL out' not in l2_runcfg_verify.stdout\n        or 'route-map PERMIT-ALL permit 10' not in l2_runcfg_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Verify the route exists in L2's BGP table.\n    # -----------------------------------------------------------------\n    - name: Verify L2 BGP table contains 10.110.2.0/24\n      raw: sudo vtysh -c \"show ip bgp 10.110.2.0/24\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_bgp_route_verify\n      until: >-\n        l2_bgp_route_verify.rc == 0\n        and '10.110.2.0/24' in l2_bgp_route_verify.stdout\n      retries: 6\n      delay: 5\n      failed_when: >-\n        l2_bgp_route_verify.rc != 0\n        or '10.110.2.0/24' not in l2_bgp_route_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Verify L2 is actually advertising the route to S2.\n    # -----------------------------------------------------------------\n    - name: Verify L2 advertises 10.110.2.0/24 to S2\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.2.2.1 advertised-routes\"\n      when: inventory_hostname == \"SONiC-VS-2\"\n      register: l2_adv_to_s2_verify\n      until: >-\n        l2_adv_to_s2_verify.rc == 0\n        and '10.110.2.0/24' in l2_adv_to_s2_verify.stdout\n      retries: 6\n      delay: 5\n      failed_when: >-\n        l2_adv_to_s2_verify.rc != 0\n        or '10.110.2.0/24' not in l2_adv_to_s2_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Verify S2 received the route.\n    # S2's neighbor corresponding to L2 is 10.2.2.0.\n    # -----------------------------------------------------------------\n    - name: Verify S2 received 10.110.2.0/24 from L2\n      raw: sudo vtysh -c \"show ip bgp 10.110.2.0/24\"\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_bgp_route_verify\n      until: >-\n        s2_bgp_route_verify.rc == 0\n        and '10.110.2.0/24' in s2_bgp_route_verify.stdout\n      retries: 6\n      delay: 5\n      failed_when: >-\n        s2_bgp_route_verify.rc != 0\n        or '10.110.2.0/24' not in s2_bgp_route_verify.stdout\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Verify S2-L2 BGP session remains Established.\n    # -----------------------------------------------------------------\n    - name: Verify S2-L2 BGP session remains Established\n      raw: sudo vtysh -c \"show ip bgp neighbors 10.2.2.0\" | grep -i \"BGP state\"\n      when: inventory_hostname == \"SONiC-VS-6\"\n      register: s2_l2_session_verify\n      failed_when: >-\n        s2_l2_session_verify.rc != 0\n        or 'established' not in s2_l2_session_verify.stdout | lower\n      changed_when: false\n\n    # -----------------------------------------------------------------\n    # Final output.\n    # -----------------------------------------------------------------\n    - name: Display L2 advertisement result\n      debug:\n        var: l2_adv_to_s2_verify.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-2\"\n\n    - name: Display S2 received route\n      debug:\n        var: s2_bgp_route_verify.stdout_lines\n      when: inventory_hostname == \"SONiC-VS-6\"",
+  "expected_diff": [
+    {
+      "id": "bgp_neighbor:sonic-vs-2:sonic-vs-2:10.2.2.1",
+      "table": "bgp_neighbor",
+      "node": "sonic-vs-2",
+      "change": "modified",
+      "detail": {
+        "Export_Policy": {
+          "old": null,
+          "new": [
+            "PERMIT-ALL"
+          ]
+        }
+      }
+    },
+    {
+      "id": "named_structure:sonic-vs-2:sonic-vs-2:Routing_Policy:PERMIT-ALL",
+      "table": "named_structure",
+      "node": "sonic-vs-2",
+      "change": "added",
+      "detail": {
+        "Structure_Definition": [
+          "name",
+          "statements"
+        ]
+      }
+    },
+    {
+      "id": "named_structure:sonic-vs-2:sonic-vs-2:VRF:default",
+      "table": "named_structure",
+      "node": "sonic-vs-2",
+      "change": "modified",
+      "detail": {
+        "Structure_Definition": {
+          "old": {
+            "name": "default",
+            "bgpProcess": {
+              "clientToClientReflection": true,
+              "ebgpAdminCost": 20,
+              "ibgpAdminCost": 200,
+              "localAdminCost": 200,
+              "localOriginationTypeTieBreaker": "NO_PREFERENCE",
+              "networkNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributeNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributionPolicy": "~BGP_REDISTRIBUTION_POLICY:default~",
+              "routerId": "10.1.0.1",
+              "clusterListAsIbgpCost": true,
+              "multipathEbgp": false,
+              "multipathEquivalentAsPathMatchMode": "EXACT_PATH",
+              "multipathIbgp": false,
+              "neighbors": {
+                "10.2.2.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.2.2.1~",
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65002,
+                  "localIp": "10.2.2.0",
+                  "peerAddress": "10.2.2.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                }
+              },
+              "tieBreaker": "ARRIVAL_ORDER"
+            },
+            "resolutionPolicy": "~RESOLUTION_POLICY~"
+          },
+          "new": {
+            "name": "default",
+            "bgpProcess": {
+              "clientToClientReflection": true,
+              "ebgpAdminCost": 20,
+              "ibgpAdminCost": 200,
+              "localAdminCost": 200,
+              "localOriginationTypeTieBreaker": "NO_PREFERENCE",
+              "networkNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributeNextHopIpTieBreaker": "HIGHEST_NEXT_HOP_IP",
+              "redistributionPolicy": "~BGP_REDISTRIBUTION_POLICY:default~",
+              "routerId": "10.1.0.1",
+              "clusterListAsIbgpCost": true,
+              "multipathEbgp": false,
+              "multipathEquivalentAsPathMatchMode": "EXACT_PATH",
+              "multipathIbgp": false,
+              "neighbors": {
+                "10.2.2.1": {
+                  "class": "org.batfish.datamodel.BgpActivePeerConfig",
+                  "checkLocalIpOnAccept": true,
+                  "clusterId": 167837697,
+                  "defaultMetric": 0,
+                  "ebgpMultihop": false,
+                  "enforceFirstAs": true,
+                  "ipv4UnicastAddressFamily": {
+                    "addressFamilyCapabilities": {
+                      "additionalPathsReceive": false,
+                      "additionalPathsSelectAll": false,
+                      "additionalPathsSend": false,
+                      "advertiseExternal": false,
+                      "advertiseInactive": true,
+                      "allowLocalAsIn": false,
+                      "allowRemoteAsOut": "ALWAYS",
+                      "sendCommunity": false,
+                      "sendExtendedCommunity": false
+                    },
+                    "exportPolicy": "~BGP_PEER_EXPORT_POLICY:default:10.2.2.1~",
+                    "exportPolicySources": [
+                      "PERMIT-ALL"
+                    ],
+                    "routeReflectorClient": false
+                  },
+                  "localAs": 65002,
+                  "localIp": "10.2.2.0",
+                  "peerAddress": "10.2.2.1",
+                  "remoteAsns": "65100",
+                  "replaceNonLocalAsesOnExport": false
+                }
+              },
+              "tieBreaker": "ARRIVAL_ORDER"
+            },
+            "resolutionPolicy": "~RESOLUTION_POLICY~"
+          }
+        }
+      }
+    }
+  ]
+}

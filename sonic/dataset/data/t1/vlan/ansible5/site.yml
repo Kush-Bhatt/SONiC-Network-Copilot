@@ -1,0 +1,210 @@
+---
+########################################
+# Leaf-Spine Topology Automation
+# VS-1, VS-2 = Leaves
+# VS-3, VS-4 = Spines
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }   # → VS-1
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }   # → VS-2
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }  # via VS-1
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }  # via VS-2
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }   # → VS-2
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }   # → VS-1
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }  # via VS-1
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }  # via VS-2
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    # --- Cleanup existing IPs ---
+    - name: Remove existing IPs on spine inter-switch links
+      shell: |
+        existing=$(show ip interfaces | grep "{{ item.iface }}" | awk '{print $3}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+          sleep 1
+        fi
+      loop: "{{ my_config.links }}"
+      ignore_errors: true
+
+    # --- Assign /30 IPs ---
+    - name: Assign IP on spine inter-switch links
+      shell: |
+        config interface ip add {{ item.iface }} {{ item.ip }}
+        sleep 1
+      loop: "{{ my_config.links }}"
+
+    # --- Remove existing static routes ---
+    - name: Remove existing static routes on spine
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+          sleep 1
+        fi
+      loop: "{{ my_config.routes }}"
+      ignore_errors: true
+
+    # --- Add static routes ---
+    - name: Add static routes on spine
+      shell: |
+        config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        sleep 1
+      loop: "{{ my_config.routes }}"
+
+    # --- Save config ---
+    - name: Save SONiC config on spine
+      shell: config save -y
+
+
+- name: Configure Leaf Switches (VS-1, VS-2)
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }   # → VS-3
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }   # → VS-4
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }  # via VS-3
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }  # via VS-4
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }   # → VS-4
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }   # → VS-3
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }  # via VS-4
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }  # via VS-3
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    # --- Remove access port from ANY vlan it may belong to ---
+    - name: Remove access port from any VLAN it belongs to
+      shell: |
+        for vid in $(show vlan brief | grep "{{ my_config.access_port }}" | awk '{print $2}'); do
+          config vlan member del $vid {{ my_config.access_port }}
+          sleep 1
+        done
+      ignore_errors: true
+
+    # --- Remove IP from access port if it is a router interface ---
+    - name: Remove any IP on access port Ethernet4
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ my_config.access_port }}" | awk '{print $3}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ my_config.access_port }} $existing
+          sleep 2
+        fi
+      ignore_errors: true
+
+    # --- Cleanup existing IPs on inter-switch links ---
+    - name: Remove existing IPs on leaf inter-switch links
+      shell: |
+        existing=$(show ip interfaces | grep "^{{ item.iface }}" | awk '{print $3}')
+        if [ -n "$existing" ]; then
+          config interface ip remove {{ item.iface }} $existing
+          sleep 1
+        fi
+      loop: "{{ my_config.links }}"
+      ignore_errors: true
+
+    # --- Remove VLAN SVI IP if exists ---
+    - name: Remove existing VLAN SVI IP if present
+      shell: |
+        existing=$(show ip interfaces | grep "^Vlan{{ my_config.vlan_id }}" | awk '{print $3}')
+        if [ -n "$existing" ]; then
+          config interface ip remove Vlan{{ my_config.vlan_id }} $existing
+          sleep 1
+        fi
+      ignore_errors: true
+
+    # --- Remove VLAN if exists ---
+    - name: Remove existing VLAN if present
+      shell: |
+        existing=$(show vlan brief | grep "^\s*{{ my_config.vlan_id }}")
+        if [ -n "$existing" ]; then
+          config vlan del {{ my_config.vlan_id }}
+          sleep 2
+        fi
+      ignore_errors: true
+
+    # --- Create VLAN fresh ---
+    - name: Create VLAN {{ my_config.vlan_id }}
+      shell: |
+        config vlan add {{ my_config.vlan_id }}
+        sleep 2
+
+    # --- Add access port untagged ---
+    - name: Add access port to VLAN (untagged)
+      shell: |
+        sleep 2
+        config vlan member add -u {{ my_config.vlan_id }} {{ my_config.access_port }}
+        sleep 1
+
+    # --- Assign SVI IP ---
+    - name: Assign SVI IP to Vlan{{ my_config.vlan_id }}
+      shell: |
+        config interface ip add Vlan{{ my_config.vlan_id }} {{ my_config.vlan_ip }}
+        sleep 1
+
+    # --- Assign /30 IPs on uplinks ---
+    - name: Assign IP on leaf inter-switch uplinks
+      shell: |
+        config interface ip add {{ item.iface }} {{ item.ip }}
+        sleep 1
+      loop: "{{ my_config.links }}"
+
+    # --- Remove existing static routes ---
+    - name: Remove existing static routes on leaf
+      shell: |
+        existing=$(ip route show {{ item.prefix }} | grep -v "proto kernel")
+        if [ -n "$existing" ]; then
+          config route del prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+          sleep 1
+        fi
+      loop: "{{ my_config.routes }}"
+      ignore_errors: true
+
+    # --- Add static routes ---
+    - name: Add static routes on leaf
+      shell: |
+        config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }}
+        sleep 1
+      loop: "{{ my_config.routes }}"
+
+    # --- Save config ---
+    - name: Save SONiC config on leaf
+      shell: config save -y
+
+    # --- Verify ---
+    - name: Verify VLAN member is present
+      shell: show vlan brief
+      register: vlan_output
+
+    - name: Show VLAN brief output
+      debug:
+        var: vlan_output.stdout

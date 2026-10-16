@@ -1,0 +1,300 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 192.168.100.2
+        - 192.168.100.3
+        - 192.168.100.4
+      changed_when: false
+
+- name: Validate all switch variables before touching anything
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+  tasks:
+
+    - name: Assert required variables are defined
+      ansible.builtin.assert:
+        that:
+          - interfaces_to_clean is defined
+          - vrfs is defined
+          - loopbacks is defined
+          - loopbacks | length > 0
+          - mgmt_iface is defined
+          - mgmt_ip is defined
+          - l3_interfaces is defined
+          - portchannels is defined
+          - portchannels | length > 0
+          - vlans is defined
+          - static_routes is defined
+          - static_routes | length > 0
+          - host_facing_ports is defined
+        fail_msg: "{{ inventory_hostname }} is missing required variables — aborting"
+        success_msg: "{{ inventory_hostname }} variables validated OK"
+
+    - name: Assert each loopback has name and ip
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.ip is defined
+        fail_msg: "Loopback entry missing name or ip on {{ inventory_hostname }}"
+      loop: "{{ loopbacks }}"
+
+    - name: Assert each portchannel has required fields
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.ip is defined
+          - item.members is defined
+          - item.members | length > 0
+          - item.min_links is defined
+          - item.mtu is defined
+        fail_msg: "PortChannel entry missing fields on {{ inventory_hostname }}"
+      loop: "{{ portchannels }}"
+
+    - name: Assert each L3 interface has required fields
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.ip is defined
+          - item.vrf is defined
+          - item.mtu is defined
+        fail_msg: "L3 interface entry missing fields on {{ inventory_hostname }}"
+      loop: "{{ l3_interfaces }}"
+      when: l3_interfaces | length > 0
+
+    - name: Assert each static route has prefix and nexthop
+      ansible.builtin.assert:
+        that:
+          - item.prefix is defined
+          - item.nexthop is defined
+        fail_msg: "Static route missing prefix or nexthop on {{ inventory_hostname }}"
+      loop: "{{ static_routes }}"
+
+    - name: Assert each VLAN has required fields
+      ansible.builtin.assert:
+        that:
+          - item.id is defined
+          - item.ip is defined
+          - item.members is defined
+        fail_msg: "VLAN entry missing fields on {{ inventory_hostname }}"
+      loop: "{{ vlans }}"
+      when: vlans | length > 0
+
+    - name: Build config summary fact
+      ansible.builtin.set_fact:
+        switch_summary:
+          host: "{{ inventory_hostname }}"
+          interfaces_to_clean_count: "{{ interfaces_to_clean | length }}"
+          vrf_count: "{{ vrfs | length }}"
+          loopback_count: "{{ loopbacks | length }}"
+          mgmt: "{{ mgmt_iface }} — {{ mgmt_ip }}"
+          l3_interface_count: "{{ l3_interfaces | length }}"
+          portchannel_count: "{{ portchannels | length }}"
+          vlan_count: "{{ vlans | length }}"
+          static_route_count: "{{ static_routes | length }}"
+          host_facing_port_count: "{{ host_facing_ports | length }}"
+
+    - name: Print config summary before pushing
+      ansible.builtin.debug:
+        var: switch_summary
+
+- name: VRF-aware SONiC config push — validate-first style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 0. PRE-CLEAN ────────────────────────────────────
+    - name: Clean bare INTERFACE entries from CONFIG_DB
+      ansible.builtin.shell: |
+        for key in $(sonic-db-cli CONFIG_DB keys "INTERFACE|{{ item }}|*" 2>/dev/null); do
+          ip=$(echo "$key" | awk -F'|' '{print $3}')
+          sudo config interface ip remove {{ item }} "$ip" 2>/dev/null || true
+        done
+        exists=$(sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "1" ]; then
+          sonic-db-cli CONFIG_DB del "INTERFACE|{{ item }}"
+          echo changed
+        else
+          echo ok
+        fi
+      register: clean_iface
+      changed_when: "'changed' in clean_iface.stdout"
+      loop: "{{ interfaces_to_clean | default([]) }}"
+
+    # ── 1. VRFs ─────────────────────────────────────────
+    - name: Create VRF
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VRF|{{ item.name }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config vrf add {{ item.name }} && echo changed; else echo ok; fi
+      loop: "{{ vrfs | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: vrfs | length > 0
+
+    # ── 2. LOOPBACKS ────────────────────────────────────
+    - name: Create loopback interface
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config loopback add {{ item.name }} && echo changed; else echo ok; fi
+      loop: "{{ loopbacks | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Assign loopback IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ loopbacks | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 3. MANAGEMENT INTERFACE ─────────────────────────
+    - name: Assign management interface IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "INTERFACE|{{ mgmt_iface }}|{{ mgmt_ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ mgmt_iface }} {{ mgmt_ip }} && echo changed; else echo ok; fi
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 4. L3 INTERFACES (VRF-bound) ────────────────────
+    - name: Bind L3 interface to VRF
+      ansible.builtin.shell: |
+        bound=$(sonic-db-cli CONFIG_DB hget "INTERFACE|{{ item.name }}" vrf_name 2>/dev/null || echo "")
+        if [ "$bound" != "{{ item.vrf }}" ]; then sudo config interface vrf bind {{ item.name }} {{ item.vrf }} && echo changed; else echo ok; fi
+      loop: "{{ l3_interfaces | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: l3_interfaces | length > 0
+
+    - name: Assign L3 interface IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ l3_interfaces | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: l3_interfaces | length > 0
+
+    - name: Set L3 interface MTU
+      ansible.builtin.shell: |
+        current=$(sonic-db-cli CONFIG_DB hget "PORT|{{ item.name }}" mtu 2>/dev/null || echo "")
+        if [ "$current" != "{{ item.mtu | string }}" ]; then sudo config interface mtu {{ item.name }} {{ item.mtu }} && echo changed; else echo ok; fi
+      loop: "{{ l3_interfaces | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: l3_interfaces | length > 0
+
+    # ── 5. PORTCHANNELS ─────────────────────────────────
+    - name: Create PortChannel
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL|{{ item.name }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config portchannel add {{ item.name }} --min-links {{ item.min_links }} && echo changed; else echo ok; fi
+      loop: "{{ portchannels | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Add PortChannel members
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL_MEMBER|{{ item.0.name }}|{{ item.1 }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config portchannel member add {{ item.0.name }} {{ item.1 }} && echo changed; else echo ok; fi
+      loop: "{{ portchannels | default([]) | subelements('members') }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Set PortChannel MTU
+      ansible.builtin.shell: |
+        current=$(sonic-db-cli CONFIG_DB hget "PORTCHANNEL|{{ item.name }}" mtu 2>/dev/null || echo "")
+        if [ "$current" != "{{ item.mtu | string }}" ]; then sudo config interface mtu {{ item.name }} {{ item.mtu }} && echo changed; else echo ok; fi
+      loop: "{{ portchannels | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Assign PortChannel IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ portchannels | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 6. VLANs ────────────────────────────────────────
+    - name: Create VLAN
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN|Vlan{{ item.id }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config vlan add {{ item.id }} && echo changed; else echo ok; fi
+      loop: "{{ vlans | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: vlans | length > 0
+
+    - name: Assign VLAN SVI IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN_INTERFACE|Vlan{{ item.id }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add Vlan{{ item.id }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ vlans | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: vlans | length > 0
+
+    - name: Add VLAN member ports
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN_MEMBER|Vlan{{ item.0.id }}|{{ item.1.port }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then
+          sudo config vlan member add {{ item.0.id }} {{ item.1.port }} \
+            {% if item.1.mode == 'untagged' %}--untagged{% endif %} && echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ vlans | default([]) | subelements('members') }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: vlans | length > 0
+
+    # ── 7. STATIC ROUTES ────────────────────────────────
+    - name: Add static route via FRR
+      ansible.builtin.shell: |
+        existing=$(sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "^ip route {{ item.prefix }} {{ item.nexthop }}" || true)
+        if [ "$existing" = "0" ]; then
+          sudo vtysh -c "configure terminal" \
+                     -c "ip route {{ item.prefix }} {{ item.nexthop }}" \
+                     -c "end" \
+                     -c "write memory" && echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ static_routes | default([]) }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 8. SAVE ─────────────────────────────────────────
+    - name: Save SONiC config
+      ansible.builtin.shell: sudo config save -y
+      changed_when: true
+
+    # ── 9. VERIFY ───────────────────────────────────────
+    - name: Collect and register all verification output
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop:
+        - { cmd: "show ip interfaces",                  label: "IP interfaces" }
+        - { cmd: "show ip route",                       label: "IP routes" }
+        - { cmd: "show vrf",                            label: "VRFs" }
+        - { cmd: "sudo vtysh -c 'show running-config'", label: "FRR config" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print all verification results for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── {{ item.item.label }} ──"
+          - "{{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

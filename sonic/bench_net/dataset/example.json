@@ -1,0 +1,46 @@
+{
+  "id": "VLAN-E-01",
+  "query": "create vlan 100 on sonic-vs-1, no SVI needed",
+  "category": "vlan",
+  "topology": "bench-net-4-1",
+  "init_state": "bench-net-4-1-s0",
+  "reference_playbook": "---\n- name: Agentic-SONiC bench_net dataset item - VLAN-E-01\n  hosts: sonic_switches\n  gather_facts: false\n  become: true\n  become_method: sudo\n  tasks:\n  - name: Add VLAN100 on SONiC-VS-1\n    raw: config vlan add 100\n    when: inventory_hostname == \"SONiC-VS-1\"\n    ignore_errors: true\n\n  - name: Verify VLAN100 exists\n    raw: show vlan brief | grep -w 100\n    when: inventory_hostname == \"SONiC-VS-1\"\n    register: vlan_check\n    failed_when: vlan_check.rc != 0 or vlan_check.stdout == ''\n    changed_when: false\n\n  - name: Save config on SONiC-VS-1\n    raw: sudo config save -y\n    when: inventory_hostname == \"SONiC-VS-1\"\n",
+  "expected_diff": [
+    {
+      "id": "vlan:sonic-vs-1:sonic-vs-1:100",
+      "table": "vlan",
+      "node": "sonic-vs-1",
+      "change": "added",
+      "detail": {
+        "Interfaces": [
+          "sonic-vs-1[Vlan100]"
+        ]
+      }
+    },
+    {
+      "id": "interface:sonic-vs-1:sonic-vs-1[Vlan100]",
+      "table": "interface",
+      "node": "sonic-vs-1",
+      "change": "added",
+      "detail": {
+        "Active": false,
+        "Admin_Up": true,
+        "Auto_State_VLAN": true,
+        "Bandwidth": 1000000000.0,
+        "Declared_Names": [
+          "Vlan100"
+        ],
+        "Inactive_Reason": "Autostate failure",
+        "MTU": 1500,
+        "Proxy_ARP": true,
+        "Rip_Enabled": false,
+        "Rip_Passive": false,
+        "Spanning_Tree_Portfast": false,
+        "Switchport": false,
+        "Switchport_Mode": "NONE",
+        "Switchport_Trunk_Encapsulation": "DOT1Q",
+        "VRF": "default"
+      }
+    }
+  ]
+}

@@ -1,0 +1,293 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 192.168.100.2
+        - 192.168.100.3
+        - 192.168.100.4
+      changed_when: false
+
+- name: Full config push — conditional chaining style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 0. PRE-CLEAN ────────────────────────────────────
+    - name: Check which interfaces need cleaning
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item }}" 2>/dev/null || echo "0"
+      loop: "{{ interfaces_to_clean | default([]) }}"
+      register: iface_check
+      changed_when: false
+
+    - name: Clean dirty interfaces
+      ansible.builtin.shell: |
+        for key in $(sonic-db-cli CONFIG_DB keys "INTERFACE|{{ item.item }}|*" 2>/dev/null); do
+          ip=$(echo "$key" | awk -F'|' '{print $3}')
+          sudo config interface ip remove {{ item.item }} "$ip" 2>/dev/null || true
+        done
+        sonic-db-cli CONFIG_DB del "INTERFACE|{{ item.item }}"
+      loop: "{{ iface_check.results }}"
+      when: item.stdout == "1"
+      changed_when: true
+
+    # ── 1. LOOPBACKS ────────────────────────────────────
+    - name: Check which loopbacks are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}" 2>/dev/null || echo "0"
+      loop: "{{ loopbacks }}"
+      register: lo_check
+      changed_when: false
+
+    - name: Create missing loopbacks
+      ansible.builtin.shell: sudo config loopback add {{ item.item.name }} && echo changed
+      loop: "{{ lo_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    - name: Check which loopback IPs are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0"
+      loop: "{{ loopbacks }}"
+      register: lo_ip_check
+      changed_when: false
+
+    - name: Assign missing loopback IPs
+      ansible.builtin.shell: sudo config interface ip add {{ item.item.name }} {{ item.item.ip }}
+      loop: "{{ lo_ip_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 2. PORTCHANNELS ─────────────────────────────────
+    - name: Check which PortChannels are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "PORTCHANNEL|{{ item.name }}" 2>/dev/null || echo "0"
+      loop: "{{ portchannels }}"
+      register: pc_check
+      changed_when: false
+
+    - name: Create missing PortChannels
+      ansible.builtin.shell: sudo config portchannel add {{ item.item.name }} --min-links {{ item.item.min_links }}
+      loop: "{{ pc_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    - name: Check which PortChannel members are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "PORTCHANNEL_MEMBER|{{ item.0.name }}|{{ item.1 }}" 2>/dev/null || echo "0"
+      loop: "{{ portchannels | subelements('members') }}"
+      register: pc_member_check
+      changed_when: false
+
+    - name: Add missing PortChannel members
+      ansible.builtin.shell: sudo config portchannel member add {{ item.item.0.name }} {{ item.item.1 }}
+      loop: "{{ pc_member_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    - name: Check which PortChannel IPs are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "PORTCHANNEL_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0"
+      loop: "{{ portchannels }}"
+      register: pc_ip_check
+      changed_when: false
+
+    - name: Assign missing PortChannel IPs
+      ansible.builtin.shell: sudo config interface ip add {{ item.item.name }} {{ item.item.ip }}
+      loop: "{{ pc_ip_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 3. ROUTED INTERFACES ────────────────────────────
+    - name: Check which interface IPs are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0"
+      loop: "{{ interfaces }}"
+      register: intf_check
+      changed_when: false
+
+    - name: Assign missing interface IPs
+      ansible.builtin.shell: sudo config interface ip add {{ item.item.name }} {{ item.item.ip }}
+      loop: "{{ intf_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 4. VLANs ────────────────────────────────────────
+    - name: Check which VLANs are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "VLAN|Vlan{{ item.id }}" 2>/dev/null || echo "0"
+      loop: "{{ vlans }}"
+      register: vlan_check
+      changed_when: false
+      when: vlans | length > 0
+
+    - name: Create missing VLANs
+      ansible.builtin.shell: sudo config vlan add {{ item.item.id }}
+      loop: "{{ vlan_check.results }}"
+      when:
+        - vlans | length > 0
+        - item.stdout == "0"
+      changed_when: true
+
+    - name: Check which VLAN IPs are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "VLAN_INTERFACE|Vlan{{ item.id }}|{{ item.ip }}" 2>/dev/null || echo "0"
+      loop: "{{ vlans }}"
+      register: vlan_ip_check
+      changed_when: false
+      when: vlans | length > 0
+
+    - name: Assign missing VLAN IPs
+      ansible.builtin.shell: sudo config interface ip add Vlan{{ item.item.id }} {{ item.item.ip }}
+      loop: "{{ vlan_ip_check.results }}"
+      when:
+        - vlans | length > 0
+        - item.stdout == "0"
+      changed_when: true
+
+    - name: Check which VLAN members are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "VLAN_MEMBER|Vlan{{ item.0.id }}|{{ item.1.port }}" 2>/dev/null || echo "0"
+      loop: "{{ vlans | subelements('members') }}"
+      register: vlan_member_check
+      changed_when: false
+      when: vlans | length > 0
+
+    - name: Add missing VLAN members
+      ansible.builtin.shell: |
+        sudo config vlan member add {{ item.item.0.id }} {{ item.item.1.port }} {% if item.item.1.mode == 'untagged' %}--untagged{% endif %}
+      loop: "{{ vlan_member_check.results }}"
+      when:
+        - vlans | length > 0
+        - item.stdout == "0"
+      changed_when: true
+
+    # ── 5. STATIC ROUTES ────────────────────────────────
+    - name: Check which static routes are missing
+      ansible.builtin.shell: |
+        sonic-db-cli CONFIG_DB exists "STATIC_ROUTE|{{ item.vrf }}|{{ item.prefix }}" 2>/dev/null || echo "0"
+      loop: "{{ static_routes }}"
+      register: route_check
+      changed_when: false
+
+    - name: Add missing static routes
+      ansible.builtin.shell: sudo config route add prefix {{ item.item.prefix }} nexthop {{ item.item.nexthop }}
+      loop: "{{ route_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 6. FRR ROUTES ───────────────────────────────────
+    - name: Check which FRR routes are missing
+      ansible.builtin.shell: |
+        sudo vtysh -c "show running-config" 2>/dev/null \
+          | grep -c "^ip route {{ item.prefix }} {{ item.nexthop }}" || true
+      loop: "{{ frr_default_routes }}"
+      register: frr_check
+      changed_when: false
+
+    - name: Add missing FRR routes
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "ip route {{ item.item.prefix }} {{ item.item.nexthop }}" \
+                   -c "end" \
+                   -c "write memory"
+      loop: "{{ frr_check.results }}"
+      when: item.stdout == "0"
+      changed_when: true
+
+    # ── 7. SAVE ─────────────────────────────────────────
+    - name: Save SONiC config
+      ansible.builtin.shell: sudo config save -y
+      changed_when: true
+
+    # ── 8. IPTABLES ─────────────────────────────────────
+    - name: Check existing FORWARD rule count per comment
+      ansible.builtin.shell: |
+        sudo iptables -L FORWARD --line-numbers -n | grep -c "{{ item.comment }}" || true
+      loop: "{{ iptables_forward_rules }}"
+      register: ipt_count
+      changed_when: false
+      when: iptables_forward_rules | length > 0
+
+    - name: Flush FORWARD chain if any duplicates detected
+      ansible.builtin.shell: sudo iptables -F FORWARD
+      when:
+        - iptables_forward_rules | length > 0
+        - ipt_count.results | selectattr('stdout', 'gt', '1') | list | length > 0
+      changed_when: true
+
+    - name: Check which FORWARD rules with state are missing
+      ansible.builtin.shell: |
+        sudo iptables -C FORWARD -s {{ item.src }} -d {{ item.dst }} \
+          -m state --state {{ item.state }} -j {{ item.action }} 2>/dev/null \
+          && echo exists || echo missing
+      loop: "{{ iptables_forward_rules }}"
+      register: ipt_state_check
+      changed_when: false
+      when:
+        - iptables_forward_rules | length > 0
+        - item.state is defined
+
+    - name: Add missing FORWARD rules with state
+      ansible.builtin.shell: |
+        sudo iptables -A FORWARD -s {{ item.item.src }} -d {{ item.item.dst }} \
+          -m state --state {{ item.item.state }} -j {{ item.item.action }} \
+          -m comment --comment "{{ item.item.comment }}"
+      loop: "{{ ipt_state_check.results }}"
+      when:
+        - iptables_forward_rules | length > 0
+        - item.skipped is not defined
+        - item.stdout == "missing"
+      changed_when: true
+
+    - name: Check which FORWARD rules without state are missing
+      ansible.builtin.shell: |
+        sudo iptables -C FORWARD -s {{ item.src }} -d {{ item.dst }} \
+          -j {{ item.action }} 2>/dev/null \
+          && echo exists || echo missing
+      loop: "{{ iptables_forward_rules }}"
+      register: ipt_nostate_check
+      changed_when: false
+      when:
+        - iptables_forward_rules | length > 0
+        - item.state is not defined
+
+    - name: Add missing FORWARD rules without state
+      ansible.builtin.shell: |
+        sudo iptables -A FORWARD -s {{ item.item.src }} -d {{ item.item.dst }} \
+          -j {{ item.item.action }} \
+          -m comment --comment "{{ item.item.comment }}"
+      loop: "{{ ipt_nostate_check.results }}"
+      when:
+        - iptables_forward_rules | length > 0
+        - item.skipped is not defined
+        - item.stdout == "missing"
+      changed_when: true
+
+    - name: Persist iptables rules
+      ansible.builtin.shell: sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
+      changed_when: true
+      when: iptables_forward_rules | length > 0
+
+    # ── 9. VERIFY ───────────────────────────────────────
+    - name: Collect verification output
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop:
+        - { cmd: "show ip interfaces",                         label: "IP interfaces" }
+        - { cmd: "show ip route",                              label: "IP routes" }
+        - { cmd: "sudo vtysh -c 'show running-config'",        label: "FRR config" }
+        - { cmd: "sudo iptables -L FORWARD -n --line-numbers", label: "iptables FORWARD" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print verification for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg: "{{ item.item.label }}: {{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

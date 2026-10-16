@@ -1,0 +1,184 @@
+---
+########################################
+# Leaf-Spine Topology Automation — batch-script style
+# Builds one combined cleanup script and one combined
+# config script per switch, run in two shell calls total,
+# instead of one task per individual operation.
+########################################
+
+- name: Configure Spine Switches (VS-3, VS-4)
+  hosts: spines
+  gather_facts: false
+  vars:
+    spine_config:
+      vs-3:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.13.2/30 }
+          - { iface: Ethernet12, ip: 10.0.23.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.13.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.23.1 }
+      vs-4:
+        links:
+          - { iface: Ethernet4,  ip: 10.0.24.2/30 }
+          - { iface: Ethernet12, ip: 10.0.14.2/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.14.1 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.24.1 }
+
+  tasks:
+    - name: Set per-host spine vars
+      set_fact:
+        my_config: "{{ spine_config[inventory_hostname] }}"
+
+    # Single combined cleanup script: removes stale IPs on links and
+    # stale routes, all in one shell invocation per switch.
+    - name: Run combined cleanup script on spine
+      shell: |
+        {% for l in my_config.links %}
+        existing_{{ loop.index }}=$(show ip interfaces | grep "{{ l.iface }}" | awk '{print $2}')
+        [ -n "$existing_{{ loop.index }}" ] && config interface ip remove {{ l.iface }} "$existing_{{ loop.index }}" || true
+        {% endfor %}
+        {% for r in my_config.routes %}
+        route_existing_{{ loop.index }}=$(ip route show {{ r.prefix }} | grep -v "proto kernel")
+        [ -n "$route_existing_{{ loop.index }}" ] && config route del prefix {{ r.prefix }} nexthop {{ r.nexthop }} || true
+        {% endfor %}
+      changed_when: true
+      ignore_errors: true
+
+    # Single combined config script: assigns all link IPs and adds
+    # all routes, all in one shell invocation per switch.
+    - name: Run combined config script on spine
+      shell: |
+        {% for l in my_config.links %}
+        config interface ip add {{ l.iface }} {{ l.ip }}
+        {% endfor %}
+        {% for r in my_config.routes %}
+        config route add prefix {{ r.prefix }} nexthop {{ r.nexthop }}
+        {% endfor %}
+        config save -y
+      changed_when: true
+
+    - name: Show ip interfaces on spine
+      shell: show ip interfaces
+      register: iface_out
+      changed_when: false
+
+    - name: Print ip interfaces on spine
+      debug:
+        var: iface_out.stdout
+
+    - name: Show ip route on spine
+      shell: ip route
+      register: route_out
+      changed_when: false
+
+    - name: Print ip route on spine
+      debug:
+        var: route_out.stdout
+
+
+- name: Configure Leaf Switches (VS-1, VS-2)
+  hosts: leaves
+  gather_facts: false
+  vars:
+    leaf_config:
+      vs-1:
+        vlan_id: 100
+        vlan_ip: 10.0.1.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.13.1/30 }
+          - { iface: Ethernet16, ip: 10.0.14.1/30 }
+        routes:
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.13.2 }
+          - { prefix: 10.0.2.0/24, nexthop: 10.0.14.2 }
+      vs-2:
+        vlan_id: 100
+        vlan_ip: 10.0.2.1/24
+        access_port: Ethernet4
+        links:
+          - { iface: Ethernet12, ip: 10.0.24.1/30 }
+          - { iface: Ethernet16, ip: 10.0.23.1/30 }
+        routes:
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.24.2 }
+          - { prefix: 10.0.1.0/24, nexthop: 10.0.23.2 }
+
+  tasks:
+    - name: Set per-host leaf vars
+      set_fact:
+        my_config: "{{ leaf_config[inventory_hostname] }}"
+
+    # Single combined cleanup script: removes access port from any VLAN,
+    # removes its IP, removes link IPs, removes VLAN SVI IP, deletes VLAN,
+    # and removes stale routes — all in one shell invocation per switch.
+    - name: Run combined cleanup script on leaf
+      shell: |
+        for vid in $(show vlan brief | grep "{{ my_config.access_port }}" | awk '{print $1}'); do
+          config vlan member del "$vid" {{ my_config.access_port }} || true
+        done
+
+        access_existing=$(show ip interfaces | grep "^{{ my_config.access_port }}" | awk '{print $2}')
+        [ -n "$access_existing" ] && config interface ip remove {{ my_config.access_port }} "$access_existing" || true
+
+        {% for l in my_config.links %}
+        link_existing_{{ loop.index }}=$(show ip interfaces | grep "^{{ l.iface }}" | awk '{print $2}')
+        [ -n "$link_existing_{{ loop.index }}" ] && config interface ip remove {{ l.iface }} "$link_existing_{{ loop.index }}" || true
+        {% endfor %}
+
+        svi_existing=$(show ip interfaces | grep "^Vlan{{ my_config.vlan_id }}" | awk '{print $2}')
+        [ -n "$svi_existing" ] && config interface ip remove Vlan{{ my_config.vlan_id }} "$svi_existing" || true
+
+        vlan_existing=$(show vlan brief | grep "^\s*{{ my_config.vlan_id }}")
+        [ -n "$vlan_existing" ] && config vlan del {{ my_config.vlan_id }} || true
+
+        {% for r in my_config.routes %}
+        route_existing_{{ loop.index }}=$(ip route show {{ r.prefix }} | grep -v "proto kernel")
+        [ -n "$route_existing_{{ loop.index }}" ] && config route del prefix {{ r.prefix }} nexthop {{ r.nexthop }} || true
+        {% endfor %}
+      changed_when: true
+      ignore_errors: true
+
+    # Single combined config script: creates VLAN, adds access port,
+    # assigns SVI IP, assigns uplink IPs, and adds all routes —
+    # all in one shell invocation per switch.
+    - name: Run combined config script on leaf
+      shell: |
+        config vlan add {{ my_config.vlan_id }}
+        config vlan member add -u {{ my_config.vlan_id }} {{ my_config.access_port }}
+        config interface ip add Vlan{{ my_config.vlan_id }} {{ my_config.vlan_ip }}
+        {% for l in my_config.links %}
+        config interface ip add {{ l.iface }} {{ l.ip }}
+        {% endfor %}
+        {% for r in my_config.routes %}
+        config route add prefix {{ r.prefix }} nexthop {{ r.nexthop }}
+        {% endfor %}
+        config save -y
+      changed_when: true
+
+    - name: Verify VLAN member is present
+      shell: show vlan brief
+      register: vlan_output
+      changed_when: false
+
+    - name: Show VLAN brief output
+      debug:
+        var: vlan_output.stdout
+
+    - name: Show ip interfaces on leaf
+      shell: show ip interfaces
+      register: iface_out
+      changed_when: false
+
+    - name: Print ip interfaces on leaf
+      debug:
+        var: iface_out.stdout
+
+    - name: Show ip route on leaf
+      shell: ip route
+      register: route_out
+      changed_when: false
+
+    - name: Print ip route on leaf
+      debug:
+        var: route_out.stdout

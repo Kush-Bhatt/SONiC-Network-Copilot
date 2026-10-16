@@ -1,0 +1,237 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 192.168.100.2
+        - 192.168.100.3
+        - 192.168.100.4
+      changed_when: false
+
+- name: Full config push — interfaces, routes, iptables
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+  vars:
+    _interfaces_to_clean:   "{{ interfaces_to_clean }}"
+    _loopbacks:             "{{ loopbacks }}"
+    _interfaces:            "{{ interfaces }}"
+    _portchannels:          "{{ portchannels }}"
+    _vlans:                 "{{ vlans }}"
+    _static_routes:         "{{ static_routes }}"
+    _frr_default_routes:    "{{ frr_default_routes }}"
+    _iptables_forward_rules: "{{ iptables_forward_rules }}"
+
+  tasks:
+
+    # ── 0. PRE-CLEAN ────────────────────────────────────
+    - name: Clean bare INTERFACE entries before config
+      ansible.builtin.shell: |
+        for key in $(sonic-db-cli CONFIG_DB keys "INTERFACE|{{ item }}|*" 2>/dev/null); do
+          ip=$(echo "$key" | awk -F'|' '{print $3}')
+          sudo config interface ip remove {{ item }} "$ip" 2>/dev/null || true
+        done
+        exists=$(sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "1" ]; then
+          sonic-db-cli CONFIG_DB del "INTERFACE|{{ item }}"
+          echo changed
+        else
+          echo ok
+        fi
+      register: clean_iface
+      changed_when: "'changed' in clean_iface.stdout"
+      loop: "{{ _interfaces_to_clean }}"
+
+    # ── 1. LOOPBACKS ────────────────────────────────────
+    - name: Create loopback interface
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config loopback add {{ item.name }} && echo changed; else echo ok; fi
+      loop: "{{ _loopbacks }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Assign loopback IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "LOOPBACK_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ _loopbacks }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 2. PORTCHANNELS ─────────────────────────────────
+    - name: Create PortChannel
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL|{{ item.name }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config portchannel add {{ item.name }} --min-links {{ item.min_links }} && echo changed; else echo ok; fi
+      loop: "{{ _portchannels }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Add PortChannel members
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL_MEMBER|{{ item.0.name }}|{{ item.1 }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config portchannel member add {{ item.0.name }} {{ item.1 }} && echo changed; else echo ok; fi
+      loop: "{{ _portchannels | subelements('members') }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    - name: Assign PortChannel IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "PORTCHANNEL_INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ _portchannels }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 3. ROUTED INTERFACES ────────────────────────────
+    - name: Assign interface IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "INTERFACE|{{ item.name }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add {{ item.name }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ _interfaces }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 4. VLANs ────────────────────────────────────────
+    - name: Create VLAN
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN|Vlan{{ item.id }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config vlan add {{ item.id }} && echo changed; else echo ok; fi
+      loop: "{{ _vlans }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: _vlans | length > 0
+
+    - name: Assign VLAN IP
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN_INTERFACE|Vlan{{ item.id }}|{{ item.ip }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config interface ip add Vlan{{ item.id }} {{ item.ip }} && echo changed; else echo ok; fi
+      loop: "{{ _vlans }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: _vlans | length > 0
+
+    - name: Add VLAN member ports
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "VLAN_MEMBER|Vlan{{ item.0.id }}|{{ item.1.port }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config vlan member add {{ item.0.id }} {{ item.1.port }} {% if item.1.mode == 'untagged' %}--untagged{% endif %} && echo changed; else echo ok; fi
+      loop: "{{ _vlans | subelements('members') }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when: _vlans | length > 0
+
+    # ── 5. STATIC ROUTES ────────────────────────────────
+    - name: Add static route
+      ansible.builtin.shell: |
+        exists=$(sonic-db-cli CONFIG_DB exists "STATIC_ROUTE|{{ item.vrf }}|{{ item.prefix }}" 2>/dev/null || echo "0")
+        if [ "$exists" = "0" ]; then sudo config route add prefix {{ item.prefix }} nexthop {{ item.nexthop }} && echo changed; else echo ok; fi
+      loop: "{{ _static_routes }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 6. FRR ROUTES ───────────────────────────────────
+    - name: Add FRR route
+      ansible.builtin.shell: |
+        existing=$(sudo vtysh -c "show running-config" 2>/dev/null | grep -c "^ip route {{ item.prefix }} {{ item.nexthop }}" || true)
+        if [ "$existing" = "0" ]; then
+          sudo vtysh -c "configure terminal" -c "ip route {{ item.prefix }} {{ item.nexthop }}" -c "end" -c "write memory" && echo changed
+        else echo ok; fi
+      loop: "{{ _frr_default_routes }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+
+    # ── 7. SAVE ─────────────────────────────────────────
+    - name: Save SONiC config
+      ansible.builtin.shell: sudo config save -y
+      changed_when: true
+
+    # ── 8. IPTABLES ─────────────────────────────────────
+    - name: Flush duplicate FORWARD rules before applying
+      ansible.builtin.shell: |
+        count=$(sudo iptables -L FORWARD --line-numbers -n | grep -c "{{ item.comment }}" || true)
+        if [ "$count" -gt "1" ]; then
+          sudo iptables -F FORWARD
+          echo flushed
+        else
+          echo ok
+        fi
+      loop: "{{ _iptables_forward_rules }}"
+      register: flush_r
+      changed_when: "'flushed' in flush_r.stdout"
+      when: _iptables_forward_rules | length > 0
+
+    - name: Add iptables FORWARD rule (with state)
+      ansible.builtin.shell: |
+        if ! sudo iptables -C FORWARD -s {{ item.src }} -d {{ item.dst }} -m state --state {{ item.state }} -j {{ item.action }} 2>/dev/null; then
+          sudo iptables -A FORWARD -s {{ item.src }} -d {{ item.dst }} -m state --state {{ item.state }} -j {{ item.action }} -m comment --comment "{{ item.comment }}"
+          echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ _iptables_forward_rules }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when:
+        - _iptables_forward_rules | length > 0
+        - item.state is defined
+
+    - name: Add iptables FORWARD rule (no state)
+      ansible.builtin.shell: |
+        if ! sudo iptables -C FORWARD -s {{ item.src }} -d {{ item.dst }} -j {{ item.action }} 2>/dev/null; then
+          sudo iptables -A FORWARD -s {{ item.src }} -d {{ item.dst }} -j {{ item.action }} -m comment --comment "{{ item.comment }}"
+          echo changed
+        else
+          echo ok
+        fi
+      loop: "{{ _iptables_forward_rules }}"
+      register: r
+      changed_when: "'changed' in r.stdout"
+      when:
+        - _iptables_forward_rules | length > 0
+        - item.state is not defined
+
+    - name: Persist and restore iptables rules
+      ansible.builtin.shell: |
+        sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
+        sudo iptables-restore < /etc/iptables/rules.v4
+      changed_when: true
+      when: _iptables_forward_rules | length > 0
+
+    # ── 9. VERIFY ───────────────────────────────────────
+    - name: Verify — show ip interfaces
+      ansible.builtin.shell: show ip interfaces
+      register: v_intf
+      changed_when: false
+
+    - name: Verify — show ip route
+      ansible.builtin.shell: show ip route
+      register: v_route
+      changed_when: false
+
+    - name: Verify — show FRR running config
+      ansible.builtin.shell: sudo vtysh -c "show running-config"
+      register: v_frr
+      changed_when: false
+
+    - name: Verify — show iptables FORWARD chain
+      ansible.builtin.shell: sudo iptables -L FORWARD -n --line-numbers
+      register: v_ipt
+      changed_when: false
+
+    - name: Print verification for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── IP interfaces ──"
+          - "{{ v_intf.stdout }}"
+          - "── IP routes ──"
+          - "{{ v_route.stdout }}"
+          - "── FRR config ──"
+          - "{{ v_frr.stdout }}"
+          - "── iptables FORWARD ──"
+          - "{{ v_ipt.stdout }}"

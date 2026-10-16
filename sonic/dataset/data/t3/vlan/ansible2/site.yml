@@ -1,0 +1,92 @@
+---
+- name: Validate VLAN10 variables before touching anything
+  hosts: vs-1
+  gather_facts: no
+  vars:
+    vlan_id: 10
+    vlan_gateway_ip: "192.168.10.1/24"
+    vlan_ports:
+      - Ethernet8
+      - Ethernet12
+      - Ethernet16
+      - Ethernet20
+      - Ethernet24
+
+  tasks:
+    - name: Assert required variables are defined
+      assert:
+        that:
+          - vlan_id is defined
+          - vlan_gateway_ip is defined
+          - vlan_ports | length == 5
+        fail_msg: "VLAN10 config incomplete on VS-1 — aborting"
+        success_msg: "VLAN10 config validated OK on VS-1"
+
+    - name: Build config summary
+      set_fact:
+        vlan_summary:
+          vlan: "{{ vlan_id }}"
+          gateway: "{{ vlan_gateway_ip }}"
+          port_count: "{{ vlan_ports | length }}"
+          ports: "{{ vlan_ports | join(', ') }}"
+
+    - name: Print config summary before pushing
+      debug:
+        var: vlan_summary
+
+
+- name: Configure VLAN10 on SONiC-VS-1 for Alpine PCs — validate-first style
+  hosts: vs-1
+  gather_facts: no
+  vars:
+    vlan_id: 10
+    vlan_gateway_ip: "192.168.10.1/24"
+    vlan_ports:
+      - Ethernet8
+      - Ethernet12
+      - Ethernet16
+      - Ethernet20
+      - Ethernet24
+
+  tasks:
+    - name: Create VLAN10
+      command: "config vlan add {{ vlan_id }}"
+      become: yes
+      register: vlan_create
+      failed_when: vlan_create.rc != 0 and 'already exists' not in vlan_create.stderr
+
+    - name: Add ports as untagged members of VLAN10
+      command: "config vlan member add -u {{ vlan_id }} {{ item }}"
+      become: yes
+      loop: "{{ vlan_ports }}"
+      register: vlan_member_add
+      failed_when: vlan_member_add.rc != 0 and 'already' not in vlan_member_add.stderr
+
+    - name: Assign SVI gateway IP to VLAN10
+      command: "config interface ip add Vlan{{ vlan_id }} {{ vlan_gateway_ip }}"
+      become: yes
+      register: svi_ip
+      failed_when: svi_ip.rc != 0 and 'already' not in svi_ip.stderr
+
+    - name: Save SONiC running config
+      command: "config save -y"
+      become: yes
+
+    - name: Save FRR config via vtysh
+      command: 'vtysh -c "write memory"'
+      become: yes
+
+    - name: Persist iptables/netfilter rules
+      command: "netfilter-persistent save"
+      become: yes
+      ignore_errors: yes
+
+    - name: Verify VLAN10 configuration
+      command: "show vlan brief"
+      become: yes
+      register: vlan_brief
+
+    - name: Display VLAN10 verification output
+      debug:
+        var: vlan_brief.stdout_lines
+

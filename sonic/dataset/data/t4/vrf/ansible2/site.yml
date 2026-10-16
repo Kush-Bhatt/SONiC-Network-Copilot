@@ -1,0 +1,240 @@
+---
+- name: Clear stale SSH host keys from controller
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove stale known_hosts entry for each switch
+      ansible.builtin.shell: |
+        ssh-keygen -f "/home/SONICtestbed/.ssh/known_hosts" -R "{{ item }}" 2>/dev/null || true
+      loop:
+        - 192.168.100.2
+        - 192.168.100.3
+        - 192.168.100.4
+      changed_when: false
+
+- name: VRF-aware SONiC config push — block/rescue style
+  hosts: sonic_switches
+  gather_facts: false
+  serial: 1
+
+  tasks:
+
+    # ── 0. PRE-CLEAN ────────────────────────────────────
+    - name: Pre-clean bare INTERFACE entries
+      block:
+        - name: Remove IP entries for {{ item }}
+          ansible.builtin.shell: |
+            for key in $(sonic-db-cli CONFIG_DB keys "INTERFACE|{{ item }}|*" 2>/dev/null); do
+              ip=$(echo "$key" | awk -F'|' '{print $3}')
+              sudo config interface ip remove {{ item }} "$ip" 2>/dev/null || true
+            done
+            sonic-db-cli CONFIG_DB del "INTERFACE|{{ item }}" 2>/dev/null || true
+          loop: "{{ interfaces_to_clean | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: Pre-clean failed — continuing anyway
+          ansible.builtin.debug:
+            msg: "Pre-clean on {{ inventory_hostname }} had errors, continuing"
+
+    # ── 1. VRFs ─────────────────────────────────────────
+    - name: Create VRFs
+      when: vrfs | length > 0
+      block:
+        - name: Create VRF {{ item.name }}
+          ansible.builtin.shell: sudo config vrf add {{ item.name }}
+          loop: "{{ vrfs | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: VRF already exists — continuing
+          ansible.builtin.debug:
+            msg: "VRF already exists on {{ inventory_hostname }}, continuing"
+
+    # ── 2. LOOPBACKS ────────────────────────────────────
+    - name: Create loopbacks
+      block:
+        - name: Create loopback {{ item.name }}
+          ansible.builtin.shell: sudo config loopback add {{ item.name }}
+          loop: "{{ loopbacks | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: Loopback already exists — continuing
+          ansible.builtin.debug:
+            msg: "Loopback already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Assign loopback IPs
+      block:
+        - name: Add IP {{ item.ip }} to {{ item.name }}
+          ansible.builtin.shell: sudo config interface ip add {{ item.name }} {{ item.ip }}
+          loop: "{{ loopbacks | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: Loopback IP already assigned — continuing
+          ansible.builtin.debug:
+            msg: "Loopback IP already exists on {{ inventory_hostname }}, continuing"
+
+    # ── 3. MANAGEMENT INTERFACE ─────────────────────────
+    - name: Assign management interface IP
+      block:
+        - name: Add IP {{ mgmt_ip }} to {{ mgmt_iface }}
+          ansible.builtin.shell: sudo config interface ip add {{ mgmt_iface }} {{ mgmt_ip }}
+          changed_when: true
+      rescue:
+        - name: Management IP already assigned — continuing
+          ansible.builtin.debug:
+            msg: "Management IP already exists on {{ inventory_hostname }}, continuing"
+
+    # ── 4. L3 INTERFACES (VRF-bound) ────────────────────
+    - name: Configure L3 VRF-bound interfaces
+      when: l3_interfaces | length > 0
+      block:
+        - name: Bind {{ item.name }} to VRF {{ item.vrf }}
+          ansible.builtin.shell: sudo config interface vrf bind {{ item.name }} {{ item.vrf }}
+          loop: "{{ l3_interfaces | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: L3 VRF bind already done — continuing
+          ansible.builtin.debug:
+            msg: "L3 VRF bind already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Assign L3 interface IPs
+      when: l3_interfaces | length > 0
+      block:
+        - name: Add IP {{ item.ip }} to {{ item.name }}
+          ansible.builtin.shell: sudo config interface ip add {{ item.name }} {{ item.ip }}
+          loop: "{{ l3_interfaces | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: L3 interface IP already assigned — continuing
+          ansible.builtin.debug:
+            msg: "L3 interface IP already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Set L3 interface MTUs
+      when: l3_interfaces | length > 0
+      block:
+        - name: Set MTU {{ item.mtu }} on {{ item.name }}
+          ansible.builtin.shell: sudo config interface mtu {{ item.name }} {{ item.mtu }}
+          loop: "{{ l3_interfaces | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: L3 MTU already set — continuing
+          ansible.builtin.debug:
+            msg: "L3 MTU already set on {{ inventory_hostname }}, continuing"
+
+    # ── 5. PORTCHANNELS ─────────────────────────────────
+    - name: Create PortChannels
+      block:
+        - name: Create {{ item.name }}
+          ansible.builtin.shell: sudo config portchannel add {{ item.name }} --min-links {{ item.min_links }}
+          loop: "{{ portchannels | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: PortChannel already exists — continuing
+          ansible.builtin.debug:
+            msg: "PortChannel already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Add PortChannel members
+      block:
+        - name: Add member {{ item.1 }} to {{ item.0.name }}
+          ansible.builtin.shell: sudo config portchannel member add {{ item.0.name }} {{ item.1 }}
+          loop: "{{ portchannels | default([]) | subelements('members') }}"
+          changed_when: true
+      rescue:
+        - name: PortChannel member already exists — continuing
+          ansible.builtin.debug:
+            msg: "PortChannel member already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Set PortChannel MTUs
+      block:
+        - name: Set MTU {{ item.mtu }} on {{ item.name }}
+          ansible.builtin.shell: sudo config interface mtu {{ item.name }} {{ item.mtu }}
+          loop: "{{ portchannels | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: PortChannel MTU already set — continuing
+          ansible.builtin.debug:
+            msg: "PortChannel MTU already set on {{ inventory_hostname }}, continuing"
+
+    - name: Assign PortChannel IPs
+      block:
+        - name: Add IP {{ item.ip }} to {{ item.name }}
+          ansible.builtin.shell: sudo config interface ip add {{ item.name }} {{ item.ip }}
+          loop: "{{ portchannels | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: PortChannel IP already assigned — continuing
+          ansible.builtin.debug:
+            msg: "PortChannel IP already exists on {{ inventory_hostname }}, continuing"
+
+    # ── 6. VLANs ────────────────────────────────────────
+    - name: Create VLANs
+      when: vlans | length > 0
+      block:
+        - name: Create Vlan{{ item.id }}
+          ansible.builtin.shell: sudo config vlan add {{ item.id }}
+          loop: "{{ vlans | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: VLAN already exists — continuing
+          ansible.builtin.debug:
+            msg: "VLAN already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Assign VLAN SVI IPs
+      when: vlans | length > 0
+      block:
+        - name: Add SVI IP {{ item.ip }} to Vlan{{ item.id }}
+          ansible.builtin.shell: sudo config interface ip add Vlan{{ item.id }} {{ item.ip }}
+          loop: "{{ vlans | default([]) }}"
+          changed_when: true
+      rescue:
+        - name: VLAN SVI IP already assigned — continuing
+          ansible.builtin.debug:
+            msg: "VLAN SVI IP already exists on {{ inventory_hostname }}, continuing"
+
+    - name: Add VLAN member ports
+      when: vlans | length > 0
+      block:
+        - name: Add {{ item.1.port }} to Vlan{{ item.0.id }}
+          ansible.builtin.shell: |
+            sudo config vlan member add {{ item.0.id }} {{ item.1.port }} \
+              {% if item.1.mode == 'untagged' %}--untagged{% endif %}
+          loop: "{{ vlans | default([]) | subelements('members') }}"
+          changed_when: true
+      rescue:
+        - name: VLAN member already exists — continuing
+          ansible.builtin.debug:
+            msg: "VLAN member already exists on {{ inventory_hostname }}, continuing"
+
+    # ── 7. STATIC ROUTES ────────────────────────────────
+    - name: Add static routes via FRR
+      ansible.builtin.shell: |
+        sudo vtysh -c "configure terminal" \
+                   -c "ip route {{ item.prefix }} {{ item.nexthop }}" \
+                   -c "end" \
+                   -c "write memory"
+      loop: "{{ static_routes | default([]) }}"
+      changed_when: true
+      ignore_errors: true
+
+    # ── 8. SAVE ─────────────────────────────────────────
+    - name: Save SONiC config
+      ansible.builtin.shell: sudo config save -y
+      changed_when: true
+
+    # ── 9. VERIFY ───────────────────────────────────────
+    - name: Collect verification output
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop:
+        - { cmd: "show ip interfaces",                  label: "IP interfaces" }
+        - { cmd: "show ip route",                       label: "IP routes" }
+        - { cmd: "show vrf",                            label: "VRFs" }
+        - { cmd: "sudo vtysh -c 'show running-config'", label: "FRR config" }
+      register: verify_out
+      changed_when: false
+
+    - name: Print verification for {{ inventory_hostname }}
+      ansible.builtin.debug:
+        msg:
+          - "━━━ {{ inventory_hostname }} ━━━"
+          - "── {{ item.item.label }} ──"
+          - "{{ item.stdout }}"
+      loop: "{{ verify_out.results }}"

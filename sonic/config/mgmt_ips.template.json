@@ -1,0 +1,21 @@
+{
+  "_comment": "Static mgmt IPs per GNS3 project. Key = GNS3_PROJECT_ID from .env. Add new topologies here.",
+
+    "<PROJECT_1_ID>": {
+    "_name": "t1",
+    "SONiC-VS-1": "192.168.x.x",
+    "SONiC-VS-2": "192.168.x.x",
+    "SONiC-VS-3": "192.168.x.x",
+    "SONiC-VS-4":"192.168.x.x"
+  },
+  
+  "<PROJECT_2_ID>": {
+    "_name": "t2",
+    "SONiC-VS-1": "192.168.x.x",
+    "SONiC-VS-2": "192.168.x.x",
+    "SONiC-VS-3": "192.168.x.x",
+    "SONiC-VS-4":"192.168.x.x"
+  }
+
+}
+

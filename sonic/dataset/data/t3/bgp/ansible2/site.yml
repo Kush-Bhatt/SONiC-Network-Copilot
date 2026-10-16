@@ -1,0 +1,83 @@
+---
+########################################
+# Single Switch BGP Automation — validate-first style
+# VS-1 = ASN 65001
+########################################
+
+- name: Validate VS-1 BGP variables before touching anything
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 192.168.100.2
+    neighbor_ip: 10.0.0.1
+    neighbor_asn: 65002
+    neighbor_desc: to-vs-3
+    advertise_prefix: 192.168.10.0/24
+
+  tasks:
+    - name: Assert VS-1 BGP config is complete
+      assert:
+        that:
+          - bgp_asn is defined
+          - router_id is defined
+          - neighbor_ip is defined
+          - neighbor_asn is defined
+          - advertise_prefix is defined
+        fail_msg: "VS-1 BGP config incomplete — aborting"
+        success_msg: "VS-1 BGP config validated OK"
+
+    - name: Build VS-1 config summary
+      set_fact:
+        vs1_summary:
+          asn: "{{ bgp_asn }}"
+          router_id: "{{ router_id }}"
+          neighbor: "{{ neighbor_ip }} (AS{{ neighbor_asn }}, {{ neighbor_desc }})"
+          advertises: "{{ advertise_prefix }}"
+
+    - name: Print VS-1 config summary before pushing
+      debug:
+        var: vs1_summary
+
+
+- name: Configure BGP on VS-1
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 192.168.100.2
+    neighbor_ip: 10.0.0.1
+    neighbor_asn: 65002
+    neighbor_desc: to-vs-3
+    advertise_prefix: 192.168.10.0/24
+
+  tasks:
+    - name: Configure BGP on VS-1
+      shell: |
+        vtysh -c "configure terminal" \
+              -c "router bgp {{ bgp_asn }}" \
+              -c "bgp router-id {{ router_id }}" \
+              -c "bgp log-neighbor-changes" \
+              -c "no bgp ebgp-requires-policy" \
+              -c "neighbor {{ neighbor_ip }} remote-as {{ neighbor_asn }}" \
+              -c "neighbor {{ neighbor_ip }} description {{ neighbor_desc }}" \
+              -c "neighbor {{ neighbor_ip }} timers 3 9" \
+              -c "address-family ipv4 unicast" \
+              -c "network {{ advertise_prefix }}" \
+              -c "neighbor {{ neighbor_ip }} activate" \
+              -c "neighbor {{ neighbor_ip }} soft-reconfiguration inbound" \
+              -c "end"
+
+    - name: Save FRR config on VS-1
+      shell: vtysh -c "write memory"
+
+    - name: Save SONiC config
+      shell: config save -y
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout

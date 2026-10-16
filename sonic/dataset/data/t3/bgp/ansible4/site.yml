@@ -1,0 +1,50 @@
+---
+########################################
+# Single Switch BGP Automation — vtysh stdin-piped style
+# VS-1 = ASN 65001
+########################################
+- name: Configure BGP on VS-1
+  hosts: vs-1
+  gather_facts: false
+  vars:
+    bgp_asn: 65001
+    router_id: 192.168.100.2
+    neighbor_ip: 10.0.0.1
+    neighbor_asn: 65002
+    neighbor_desc: to-vs-3
+    advertise_prefix: 192.168.10.0/24
+
+  tasks:
+    - name: Build and load BGP config on VS-1 via vtysh stdin
+      shell: |
+        {
+          echo 'configure terminal'
+          echo 'router bgp {{ bgp_asn }}'
+          echo ' bgp router-id {{ router_id }}'
+          echo ' bgp log-neighbor-changes'
+          echo ' no bgp ebgp-requires-policy'
+          echo ' neighbor {{ neighbor_ip }} remote-as {{ neighbor_asn }}'
+          echo ' neighbor {{ neighbor_ip }} description {{ neighbor_desc }}'
+          echo ' neighbor {{ neighbor_ip }} timers 3 9'
+          echo ' address-family ipv4 unicast'
+          echo '  network {{ advertise_prefix }}'
+          echo '  neighbor {{ neighbor_ip }} activate'
+          echo '  neighbor {{ neighbor_ip }} soft-reconfiguration inbound'
+          echo ' exit-address-family'
+          echo 'end'
+          echo 'write memory'
+        } | vtysh
+      changed_when: true
+
+    - name: Save SONiC config
+      shell: config save -y
+      changed_when: true
+
+    - name: Show BGP summary on VS-1
+      shell: vtysh -c "show bgp summary"
+      register: bgp_out
+      changed_when: false
+
+    - name: Print BGP summary on VS-1
+      debug:
+        var: bgp_out.stdout

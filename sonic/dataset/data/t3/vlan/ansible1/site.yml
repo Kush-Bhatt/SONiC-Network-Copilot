@@ -1,0 +1,74 @@
+---
+- name: Configure VLAN10 on SONiC-VS-1 for Alpine PCs — block/rescue style
+  hosts: vs-1
+  gather_facts: no
+  vars:
+    vlan_id: 10
+    vlan_gateway_ip: "192.168.10.1/24"
+    vlan_ports:
+      - Ethernet8
+      - Ethernet12
+      - Ethernet16
+      - Ethernet20
+      - Ethernet24
+
+  tasks:
+    - name: Configure VLAN10, members and SVI IP
+      become: yes
+      block:
+        - name: Create VLAN10
+          command: "config vlan add {{ vlan_id }}"
+          changed_when: true
+
+        - name: Add ports as untagged members of VLAN10
+          command: "config vlan member add -u {{ vlan_id }} {{ item }}"
+          loop: "{{ vlan_ports }}"
+          changed_when: true
+
+        - name: Assign SVI gateway IP to VLAN10
+          command: "config interface ip add Vlan{{ vlan_id }} {{ vlan_gateway_ip }}"
+          changed_when: true
+      rescue:
+        - name: VLAN10 config failed — likely already exists, cleaning up and retrying
+          shell: |
+            config interface ip remove Vlan{{ vlan_id }} {{ vlan_gateway_ip }} 2>/dev/null || true
+            for p in {{ vlan_ports | join(' ') }}; do
+              config vlan member del {{ vlan_id }} $p 2>/dev/null || true
+            done
+            config vlan del {{ vlan_id }} 2>/dev/null || true
+          changed_when: true
+
+        - name: Retry full VLAN10 configuration
+          shell: |
+            config vlan add {{ vlan_id }}
+            {% for p in vlan_ports %}
+            config vlan member add -u {{ vlan_id }} {{ p }}
+            {% endfor %}
+            config interface ip add Vlan{{ vlan_id }} {{ vlan_gateway_ip }}
+          changed_when: true
+
+    - name: Save SONiC running config
+      command: "config save -y"
+      become: yes
+      changed_when: true
+
+    - name: Save FRR config via vtysh
+      command: 'vtysh -c "write memory"'
+      become: yes
+      changed_when: true
+
+    - name: Persist iptables/netfilter rules
+      command: "netfilter-persistent save"
+      become: yes
+      ignore_errors: yes
+      changed_when: true
+
+    - name: Verify VLAN10 configuration
+      command: "show vlan brief"
+      become: yes
+      register: vlan_brief
+      changed_when: false
+
+    - name: Display VLAN10 verification output
+      debug:
+        var: vlan_brief.stdout_lines
